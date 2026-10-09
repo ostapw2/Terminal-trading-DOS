@@ -1,0 +1,50 @@
+# macOS
+.DS_Store
+
+# Python
+__pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
+*.egg-info
+.venv/
+.pytest_cache/
+
+# Rust
+rust/target/
+**/*.rs.bk
+Cargo.lock.bak
+
+# Pascal / DOS legacy
+legacy/*.exe
+legacy/*.o
+legacy/*.ppu
+legacy/*.a
+
+# Editors / tools
+.idea/
+.vscode/
+*.swp
+*~
+
+# Generated outputs
+*.svg
+shared/__pycache__/
+
+# Local config / secrets
+.env
+.env.local
+~/.dos/
+# Added by code-review-graph
+.code-review-graph/
+.gitnexus
+
+# Never publish
+_quarantine/
+*.orig
+*.db
+*.db-wal
+*.db-shm
+*/settings.local.json
+.publish-tree/

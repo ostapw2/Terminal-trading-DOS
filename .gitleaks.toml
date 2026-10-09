@@ -1,0 +1,9 @@
+# Used by .github/workflows/secrets.yml (gitleaks reads this file automatically).
+title = "dos"
+
+[extend]
+useDefault = true
+
+[allowlist]
+description = "Binance's published example secret from their API signing docs (used in a unit test)"
+regexes = ['''NhqPtmdSJYdKjVHjA7PZj4Mge3R5YNiP1e3UZjInClVN65XAbvqqM6A7H5fATj0j''']

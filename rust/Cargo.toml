@@ -1,0 +1,33 @@
+[package]
+name        = "dos"
+version     = "0.1.1"
+edition     = "2021"
+description = "Ultra-light trading terminal that runs anywhere: Binance data, paper trading"
+license     = "PolyForm-Noncommercial-1.0.0"
+authors     = ["Ostap Shtai"]
+repository  = "https://github.com/ostapw2/trading"
+
+[[bin]]
+name = "dos-commander"
+path = "src/bin/commander.rs"
+
+[dependencies]
+ratatui     = "0.29"
+crossterm   = "0.28"
+ureq        = { version = "2.10", default-features = false, features = ["tls", "json"] }
+serde       = { version = "1", features = ["derive"] }
+serde_json  = "1"
+rusqlite    = { version = "0.32", features = ["bundled"] }
+tungstenite = { version = "0.24", default-features = false, features = ["handshake", "rustls-tls-webpki-roots"] }
+# Authenticated Binance REST (HMAC-SHA256 query signing).  Pulled in
+# only by `engine::binance` — paper-only builds still don't ship live
+# code paths.
+hmac        = { version = "0.12", default-features = false }
+sha2        = { version = "0.10", default-features = false }
+
+[profile.release]
+opt-level     = "z"      # optimize for size
+lto           = true
+codegen-units = 1
+strip         = true
+panic         = "abort"

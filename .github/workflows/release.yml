@@ -1,0 +1,95 @@
+name: Release
+
+# Tag `vX.Y.Z` -> six archives (+ a .sha256 each) attached to the GitHub release.
+# Uses only the built-in GITHUB_TOKEN; no other secret is read.
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build ${{ matrix.target }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-musl
+            os: ubuntu-latest
+            zig: true
+          - target: aarch64-unknown-linux-musl
+            os: ubuntu-latest
+            zig: true
+          - target: aarch64-apple-darwin
+            os: macos-latest
+            zig: false
+          - target: x86_64-apple-darwin
+            os: macos-latest
+            zig: false
+          - target: x86_64-pc-windows-msvc
+            os: windows-latest
+            zig: false
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - uses: dtolnay/rust-toolchain@686976e191b89faba57d3206551f0f330d8cb249 # stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Install zig (static Linux builds)
+        if: matrix.zig
+        run: |
+          curl -fsSL https://ziglang.org/download/0.13.0/zig-linux-$(uname -m)-0.13.0.tar.xz | tar -xJ
+          echo "$PWD/zig-linux-$(uname -m)-0.13.0" >> $GITHUB_PATH
+          cargo install cargo-zigbuild --locked
+
+      # No build cache here on purpose: release binaries are built from a cold
+      # tree so a poisoned cache cannot reach them.
+
+      - name: Test
+        if: matrix.target == 'aarch64-apple-darwin' || matrix.target == 'x86_64-pc-windows-msvc'
+        working-directory: rust
+        run: cargo test --locked --release --target ${{ matrix.target }}
+
+      - name: Build
+        working-directory: rust
+        shell: bash
+        run: |
+          if [ "${{ matrix.zig }}" = "true" ]; then
+            cargo zigbuild --locked --release --target ${{ matrix.target }}
+          else
+            cargo build --locked --release --target ${{ matrix.target }}
+          fi
+
+      - name: Package (unix)
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          NAME=dos-${{ github.ref_name }}-${{ matrix.target }}
+          mkdir -p dist stage
+          cp rust/target/${{ matrix.target }}/release/dos-commander LICENSE README.md stage/
+          tar -C stage -czf "dist/${NAME}.tar.gz" dos-commander LICENSE README.md
+          (cd dist && shasum -a 256 "${NAME}.tar.gz" > "${NAME}.tar.gz.sha256")
+
+      - name: Package (windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $name = "dos-${{ github.ref_name }}-${{ matrix.target }}"
+          New-Item -ItemType Directory -Force dist, stage | Out-Null
+          Copy-Item rust/target/${{ matrix.target }}/release/dos-commander.exe, LICENSE, README.md stage/
+          Compress-Archive -Path stage/* -DestinationPath "dist/$name.zip"
+          $h = (Get-FileHash "dist/$name.zip" -Algorithm SHA256).Hash.ToLower()
+          "$h  $name.zip" | Out-File -Encoding ascii "dist/$name.zip.sha256"
+
+      - name: Upload assets to release
+        if: github.event_name == 'push'
+        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
+        with:
+          files: dist/*
+          generate_release_notes: true

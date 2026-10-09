@@ -1,0 +1,74 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  rust:
+    name: Rust ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@686976e191b89faba57d3206551f0f330d8cb249 # stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Cache cargo
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            rust/target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('rust/Cargo.lock', 'rust/Cargo.toml') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-
+
+      - name: Format check
+        working-directory: rust
+        run: cargo fmt --check
+
+      - name: Build (release)
+        working-directory: rust
+        run: cargo build --locked --release
+
+      - name: Test
+        working-directory: rust
+        run: cargo test --locked --release
+
+      - name: Clippy
+        working-directory: rust
+        run: cargo clippy --locked --all-targets -- -D warnings
+
+  tokens:
+    name: Token sync check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: "3.12"
+
+      # codegen.py is standard-library only (tomllib); no env needed.
+      - name: Regenerate tokens
+        run: python3 shared/codegen.py
+
+      - name: Verify tokens are committed
+        run: |
+          if [ -n "$(git status --porcelain)" ]; then
+            echo "::error::Generated token files are out of sync with shared/tokens.toml"
+            git diff
+            exit 1
+          fi

@@ -1,0 +1,120 @@
+# DOS design tokens — single source of truth for every runtime.
+#
+# A code generator (`shared/codegen.py`) reads this file and emits:
+#   - python/src/dos/themes/dos_classic.tcss   — Textual CSS variables block
+#   - python/src/dos/themes/dos_modern.tcss    — Textual CSS variables block
+#   - rust/src/tokens.rs                       — `pub const` color literals
+#   - legacy/tokens.inc                        — Free Pascal `const` block
+#
+# When you change a token here, run `make sync-tokens` to propagate.
+
+schema_version = 1
+
+# ASCII glyph contract — every runtime renders these exact characters.
+# Do not add Unicode characters to this list under any circumstance.
+[glyphs]
+border_corner    = "+"
+border_h         = "-"
+border_v         = "|"
+checkbox_on      = "[X]"
+checkbox_off     = "[ ]"
+radio_on         = "(*)"
+radio_off        = "( )"
+switch_on        = "[ON ]"
+switch_off       = "[off]"
+select_down      = "v"
+select_up        = "^"
+scrollbar_thumb  = "#"
+scrollbar_track  = " "
+dir_prefix       = "/"
+dir_size         = "[DIR]"
+up_dir           = "/.."
+up_dir_size      = "UP--DIR"
+section_rule     = "--"
+truncate         = "~"
+
+# Heights — every form widget exactly 1 row.  See DESIGN.md §4.
+[heights]
+menu_bar      = 1
+status_line   = 1
+function_bar  = 1
+form_label    = 1
+form_row      = 1
+form_button   = 1
+form_input    = 1
+form_select   = 1
+form_check    = 1
+form_radio    = 1
+form_switch   = 1
+form_section  = 1
+form_spacer   = 1
+
+# Layout sizes
+[spacing]
+form_label_width  = 10
+form_button_min   = 10
+modal_width       = 64
+modal_padding_v   = 1
+modal_padding_h   = 2
+
+# ── DOS Classic palette (CGA 16-color faithful) ───────────────────────
+[palettes.classic]
+name = "dos-classic"
+
+  [palettes.classic.colors]
+  # Surfaces
+  bg          = [0,   0,   170]    # CGA  1 — blue       (screen background)
+  panel       = [0,   170, 170]    # CGA  3 — cyan       (header / F-bar label)
+  black       = [0,   0,   0]      # CGA  0
+  # Text
+  text        = [255, 255, 255]    # CGA 15 — white
+  muted       = [170, 170, 170]    # CGA  7 — light grey
+  # Highlights
+  accent      = [255, 255, 85]     # CGA 14 — yellow      (active border, primary btn)
+  accent_dim  = [0,   170, 170]    # CGA  3 — cyan
+  light_cyan  = [85,  255, 255]    # CGA 11
+  # Cursor (active panel)
+  cursor_bg   = [255, 255, 255]
+  cursor_fg   = [0,   0,   170]
+  # State
+  ok          = [85,  255, 85]     # CGA 10 — bright green
+  warn        = [255, 255, 85]
+  error       = [170, 0,   0]      # CGA  4 — red
+
+# ── DOS Modern palette (subtle dark, modern terminals) ───────────────
+[palettes.modern]
+name = "dos-modern"
+
+  [palettes.modern.colors]
+  bg          = [20,  22,  28]
+  panel       = [28,  32,  40]
+  black       = [10,  11,  14]
+  text        = [220, 225, 235]
+  muted       = [140, 148, 165]
+  accent      = [98,  152, 255]
+  accent_dim  = [58,  92,  160]
+  light_cyan  = [120, 180, 255]
+  cursor_bg   = [98,  152, 255]
+  cursor_fg   = [20,  22,  28]
+  ok          = [120, 200, 140]
+  warn        = [220, 180, 90]
+  error       = [220, 80,  80]
+
+# ── Component CSS contract — what each runtime must implement ─────────
+# Used by codegen to validate that all theme files declare needed slots.
+[components]
+required_widgets = [
+  "MenuBar",
+  "StatusLine",
+  "FunctionBar",
+  "TwoPanel",
+  "FilePanel",
+  "ModalDialog",
+  "Button",
+  "Input",
+  "Select",
+  "Checkbox",
+  "RadioButton",
+  "RadioSet",
+  "Switch",
+]
