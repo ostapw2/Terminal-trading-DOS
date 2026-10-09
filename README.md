@@ -67,13 +67,13 @@ None of this exists yet; it is where DOS is going.
 ### macOS / Linux
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/ostapw2/trading/main/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/ostapw2/Terminal-trading-DOS/main/install.sh | sh
 ```
 
 ### Windows (PowerShell)
 
 ```powershell
-irm https://raw.githubusercontent.com/ostapw2/trading/main/install.ps1 | iex
+irm https://raw.githubusercontent.com/ostapw2/Terminal-trading-DOS/main/install.ps1 | iex
 ```
 
 Both installers pick the right archive for your machine, **verify its SHA-256**,
@@ -88,7 +88,7 @@ dos-commander --version
 ### Manual download
 
 Pick the archive for your system from
-[Releases](https://github.com/ostapw2/trading/releases)
+[Releases](https://github.com/ostapw2/Terminal-trading-DOS/releases)
 (`dos-<tag>-<target>.tar.gz` / `.zip`, each with a `.sha256` next to it), check
 the hash, extract, put `dos-commander` on your `PATH`. Targets: Linux x86_64 /
 aarch64 (static), macOS Apple Silicon / Intel, Windows x86_64.
@@ -99,8 +99,8 @@ On macOS a browser download is quarantined by Gatekeeper; clear it with
 ### From source (Rust 1.80+)
 
 ```bash
-git clone https://github.com/ostapw2/trading.git
-cd trading/rust && cargo build --release
+git clone https://github.com/ostapw2/Terminal-trading-DOS.git
+cd Terminal-trading-DOS/rust && cargo build --release
 ./target/release/dos-commander
 ```
 

@@ -1,6 +1,6 @@
 # install.ps1 - installer for dos-commander on Windows (PowerShell 5+).
 #
-#   irm https://raw.githubusercontent.com/ostapw2/trading/main/install.ps1 | iex
+#   irm https://raw.githubusercontent.com/ostapw2/Terminal-trading-DOS/main/install.ps1 | iex
 #
 # Downloads the latest release zip, VERIFIES its SHA-256, installs to
 # %LOCALAPPDATA%\dos and adds that folder to your user PATH. No admin needed.
@@ -10,7 +10,7 @@
 
 $ErrorActionPreference = 'Stop'
 
-$repo = if ($env:DOS_REPO) { $env:DOS_REPO } else { 'ostapw2/trading' }
+$repo = if ($env:DOS_REPO) { $env:DOS_REPO } else { 'ostapw2/Terminal-trading-DOS' }
 $dir  = if ($env:DOS_INSTALL_DIR) { $env:DOS_INSTALL_DIR } else { Join-Path $env:LOCALAPPDATA 'dos' }
 $tag  = $env:DOS_TAG
 $base = if ($env:DOS_BASE_URL) { $env:DOS_BASE_URL } else { "https://github.com/$repo/releases/download" }

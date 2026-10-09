@@ -10,8 +10,8 @@ You need Rust 1.80+ ([rustup.rs](https://rustup.rs)). Nothing else: SQLite is
 bundled and TLS is pure Rust.
 
 ```bash
-git clone https://github.com/ostapw2/trading.git
-cd trading/rust
+git clone https://github.com/ostapw2/Terminal-trading-DOS.git
+cd Terminal-trading-DOS/rust
 cargo build --release
 ./target/release/dos-commander --demo
 ```

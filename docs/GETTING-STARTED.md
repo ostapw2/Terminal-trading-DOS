@@ -9,13 +9,13 @@ works without an exchange account.
 macOS / Linux:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/ostapw2/trading/main/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/ostapw2/Terminal-trading-DOS/main/install.sh | sh
 ```
 
 Windows (PowerShell):
 
 ```powershell
-irm https://raw.githubusercontent.com/ostapw2/trading/main/install.ps1 | iex
+irm https://raw.githubusercontent.com/ostapw2/Terminal-trading-DOS/main/install.ps1 | iex
 ```
 
 (While the repository is private, log in once with the GitHub CLI: `gh auth login`.)

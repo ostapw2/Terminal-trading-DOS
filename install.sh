@@ -2,7 +2,7 @@
 #
 # install.sh — installer for dos-commander (macOS, Linux).
 #
-#   curl -fsSL https://raw.githubusercontent.com/ostapw2/trading/main/install.sh | sh
+#   curl -fsSL https://raw.githubusercontent.com/ostapw2/Terminal-trading-DOS/main/install.sh | sh
 #
 # Downloads the archive for this machine from the latest GitHub release,
 # VERIFIES its SHA-256, and puts the binary in ~/.local/bin (no sudo).
@@ -14,7 +14,7 @@
 
 set -eu
 
-REPO="${DOS_REPO:-ostapw2/trading}"
+REPO="${DOS_REPO:-ostapw2/Terminal-trading-DOS}"
 INSTALL_DIR="${DOS_INSTALL_DIR:-${HOME}/.local/bin}"
 TAG="${DOS_TAG:-}"
 BASE="${DOS_BASE_URL:-https://github.com/${REPO}/releases/download}"  # tests override

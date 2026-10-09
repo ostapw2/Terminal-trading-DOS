@@ -5,7 +5,7 @@ edition     = "2021"
 description = "Ultra-light trading terminal that runs anywhere: Binance data, paper trading"
 license     = "PolyForm-Noncommercial-1.0.0"
 authors     = ["Ostap Shtai"]
-repository  = "https://github.com/ostapw2/trading"
+repository  = "https://github.com/ostapw2/Terminal-trading-DOS"
 
 [[bin]]
 name = "dos-commander"
