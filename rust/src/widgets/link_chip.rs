@@ -194,7 +194,7 @@ pub fn render_picker(
 
     // The row of choices.
     let mut x = cx;
-    for i in 0..CELLS {
+    for (i, slot) in layout.cells.iter_mut().enumerate().take(CELLS) {
         let name = if i == 0 {
             crate::i18n::pick(" Off ", " Вимк. ").to_string()
         } else {
@@ -202,7 +202,7 @@ pub fn render_picker(
         };
         let w = name.chars().count() as u16;
         let r = row_at(1, x, w);
-        layout.cells[i] = r;
+        *slot = r;
         let current = i as u8 == group;
         let picked = i == selected;
         let hot = mouse.is_some_and(|(mx, my)| rect_contains(r, mx, my));

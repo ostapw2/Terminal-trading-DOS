@@ -38,7 +38,7 @@ the terminal.
 - **Liquidations.** A live feed of forced liquidations across the futures
   market, totals per 5 min / 1 h / 24 h, the most liquidated coins, circles on
   the chart and estimated liquidation levels (a model, labelled so).
-- **Agent connector (MCP).** `dos-commander --agent` opens a local socket;
+- **Agent connector (MCP, macOS / Linux).** `dos-commander --agent` opens a local socket;
   `dos-commander mcp --role <role>` exposes it as an MCP server. Five roles
   (analyst, researcher, strategy tester, risk, scalper), permissions checked
   by the server on every call, every call logged (F8). Agents never reach live

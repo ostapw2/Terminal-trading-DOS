@@ -805,12 +805,8 @@ pub fn render_heat_page(frame: &mut Frame, area: Rect, m: &Matrix, list: &str, p
             let names: Vec<String> = g.iter().map(|&i| short(&m.names[i])).collect();
             let r = m.reordered(g);
             let mut v = Vec::new();
-            for i in 0..g.len() {
-                for j in i + 1..g.len() {
-                    if let Some(x) = r.r[i][j] {
-                        v.push(x);
-                    }
-                }
+            for (i, row) in r.r.iter().enumerate().take(g.len()) {
+                v.extend(row.iter().take(g.len()).skip(i + 1).flatten().copied());
             }
             let avg = v.iter().sum::<f64>() / v.len().max(1) as f64;
             format!("{} (r {avg:+.2})", names.join(" "))
@@ -1027,9 +1023,9 @@ pub fn render_heatmap(frame: &mut Frame, area: Rect, m: &Matrix, palette: &Palet
                 c.set_style(text);
             }
         }
-        for j in 0..n {
+        for (j, rv) in m.r[i].iter().enumerate().take(n) {
             let x = area.x + label_w + j as u16 * CELL;
-            let (cell, style) = match m.r[i][j] {
+            let (cell, style) = match *rv {
                 _ if i == j => ("    . ".to_string(), muted),
                 Some(r) => {
                     let s = format!("{r:>+5.2} ");

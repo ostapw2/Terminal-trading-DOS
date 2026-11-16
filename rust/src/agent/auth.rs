@@ -24,11 +24,22 @@ pub fn token_path(dir: &Path) -> PathBuf {
 
 /// 32 random bytes as hex.  Reads the OS entropy source directly; there is
 /// no weaker fallback — failing is better than a guessable token.
+#[cfg(unix)]
 fn random_token() -> io::Result<String> {
     use std::io::Read;
     let mut buf = [0u8; 32];
     std::fs::File::open("/dev/urandom")?.read_exact(&mut buf)?;
     Ok(buf.iter().map(|b| format!("{b:02x}")).collect())
+}
+
+/// The connector needs Unix sockets (`server::start`), so there are no tokens
+/// to make elsewhere; refusing here beats a confusing "path not found".
+#[cfg(not(unix))]
+fn random_token() -> io::Result<String> {
+    Err(io::Error::new(
+        io::ErrorKind::Unsupported,
+        "the agent connector needs Unix sockets",
+    ))
 }
 
 #[cfg(unix)]
@@ -152,6 +163,7 @@ mod tests {
         d
     }
 
+    #[cfg(unix)]
     #[test]
     fn creates_distinct_tokens_that_identify_their_role() {
         let dir = temp_dir("tok");
@@ -168,6 +180,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    #[cfg(unix)]
     #[test]
     fn tokens_persist_and_file_is_owner_only() {
         let dir = temp_dir("persist");
@@ -217,6 +230,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    #[cfg(unix)]
     #[test]
     fn short_or_corrupt_entries_are_replaced() {
         let dir = temp_dir("corrupt");
