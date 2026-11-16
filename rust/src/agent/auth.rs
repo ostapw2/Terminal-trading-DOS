@@ -157,6 +157,7 @@ fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
 mod tests {
     use super::*;
 
+    #[cfg(unix)]
     fn temp_dir(tag: &str) -> PathBuf {
         let d = std::env::temp_dir().join(format!("dos-agent-test-{tag}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&d);
