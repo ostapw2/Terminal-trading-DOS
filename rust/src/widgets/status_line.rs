@@ -29,12 +29,18 @@ fn cells(s: &str) -> u16 {
     s.chars().count().min(u16::MAX as usize) as u16
 }
 
+/// A feed older than this many seconds is called stale.
+pub const STALE_SECS: f64 = 10.0;
+
+/// `feed_age_secs`: seconds since the last price tick reached the chart or the
+/// screener (`None` = no feed information, `INFINITY` = nothing ever arrived).
 pub fn render_extended(
     frame: &mut Frame,
     area: Rect,
     text: &str,
     is_live: bool,
     ws_connected: bool,
+    feed_age_secs: Option<f64>,
     palette: &Palette,
 ) {
     let bg = Style::default().fg(palette.text).bg(palette.bg);
@@ -85,13 +91,49 @@ pub fn render_extended(
         );
     }
 
-    // WS indicator
-    if ws_connected {
-        let style = Style::default()
-            .fg(palette.light_cyan)
-            .bg(palette.bg)
-            .add_modifier(Modifier::DIM);
-        put(frame, area, &mut x, 2, Span::styled("⚡", style));
+    // Feed indicator: the age of the last tick tells whether prices really
+    // move; a connected socket alone does not.
+    match feed_age_secs {
+        Some(age) if age < STALE_SECS => {
+            let label = format!("⚡{age:.1}s ");
+            let style = Style::default()
+                .fg(palette.light_cyan)
+                .bg(palette.bg)
+                .add_modifier(Modifier::DIM);
+            put(
+                frame,
+                area,
+                &mut x,
+                cells(&label),
+                Span::styled(label, style),
+            );
+        }
+        Some(age) => {
+            let label = if age.is_finite() {
+                format!(" NO TICKS {}s ", age.round() as u64)
+            } else {
+                " NO TICKS ".to_string()
+            };
+            let style = Style::default()
+                .fg(palette.warn)
+                .bg(palette.bg)
+                .add_modifier(Modifier::BOLD);
+            put(
+                frame,
+                area,
+                &mut x,
+                cells(&label),
+                Span::styled(label, style),
+            );
+        }
+        None if ws_connected => {
+            let style = Style::default()
+                .fg(palette.light_cyan)
+                .bg(palette.bg)
+                .add_modifier(Modifier::DIM);
+            put(frame, area, &mut x, 2, Span::styled("⚡", style));
+        }
+        None => {}
     }
 
     // Separator
@@ -133,6 +175,70 @@ pub fn render_extended(
             &mut x,
             hint_w,
             Span::styled(format!(" {}", h), hint_style),
+        );
+    }
+}
+
+/// A desk window's header row: the page and what it shows, a fresh message
+/// (`note`, empty when old), and the feed only when it is stale.  The mode,
+/// the account and the feed's health live in the main window, once.
+pub fn render_bare(
+    frame: &mut Frame,
+    area: Rect,
+    title: &str,
+    note: &str,
+    feed_age_secs: Option<f64>,
+    palette: &Palette,
+) {
+    let bg = Style::default().fg(palette.text).bg(palette.bg);
+    render_clipped(
+        frame,
+        Paragraph::new(" ".repeat(area.width as usize)).style(bg),
+        area,
+    );
+    let mut x = area.x;
+    let head = format!(" {title} ");
+    put(
+        frame,
+        area,
+        &mut x,
+        cells(&head),
+        Span::styled(
+            head,
+            Style::default()
+                .fg(palette.accent)
+                .bg(palette.bg)
+                .add_modifier(Modifier::BOLD),
+        ),
+    );
+    if let Some(age) = feed_age_secs.filter(|a| *a >= STALE_SECS) {
+        let label = if age.is_finite() {
+            format!(" NO TICKS {}s ", age.round() as u64)
+        } else {
+            " NO TICKS ".to_string()
+        };
+        put(
+            frame,
+            area,
+            &mut x,
+            cells(&label),
+            Span::styled(
+                label,
+                Style::default()
+                    .fg(palette.warn)
+                    .bg(palette.bg)
+                    .add_modifier(Modifier::BOLD),
+            ),
+        );
+    }
+    if !note.is_empty() {
+        let n = format!(" {note}");
+        put(
+            frame,
+            area,
+            &mut x,
+            cells(&n),
+            Span::styled(n, Style::default().fg(palette.muted).bg(palette.bg)),
         );
     }
 }

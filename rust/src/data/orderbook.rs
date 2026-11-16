@@ -47,7 +47,7 @@ impl OrderBookSnapshot {
     pub fn total_ask_size(&self) -> f64 {
         self.asks.iter().map(|(_, q)| *q).sum()
     }
-    /// Estimate the price tick size from adjacent ask levels' median diff.
+    /// Estimate the price tick size from adjacent ask levels' mean diff.
     pub fn estimate_tick(&self) -> f64 {
         let mut diffs: Vec<f64> = Vec::new();
         if self.asks.len() >= 2 {
@@ -107,6 +107,98 @@ impl OrderBookSnapshot {
             .collect();
         asks.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
         AggregatedBook { bids, asks }
+    }
+}
+
+/// A level is a wall when it holds this many times the typical level nearby.
+pub const WALL_RATIO: f64 = 5.0;
+/// Levels per side the typical size is taken from (nearest to the spread).
+pub const WALL_WINDOW: usize = 100;
+
+/// A price level with far more resting limit orders than its neighbours.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Wall {
+    pub bid: bool,
+    pub price: f64,
+    pub size: f64,
+    /// size / the mean size of the side's nearest `WALL_WINDOW` levels.
+    pub ratio: f64,
+}
+
+/// The walls of one side (levels nearest the spread first), strongest first,
+/// at most `max`.  Typical = the mean level: books are full of dust orders
+/// (0.0001 BTC) that would pull a mean to nothing and make every real
+/// order a "wall"; a level at `ratio` x the mean stands out even though the
+/// walls themselves raise the mean.  The best level is never one.  A side
+/// with fewer than 5 levels has none.
+pub fn walls(levels: &[(f64, f64)], bid: bool, ratio: f64, max: usize) -> Vec<Wall> {
+    let near = &levels[..levels.len().min(WALL_WINDOW)];
+    if near.len() < 5 {
+        return Vec::new();
+    }
+    let sizes: Vec<f64> = near.iter().map(|l| l.1).filter(|q| *q > 0.0).collect();
+    if sizes.len() < 5 {
+        return Vec::new();
+    }
+    let mean = sizes.iter().sum::<f64>() / sizes.len() as f64;
+    // The best level is skipped: market makers always quote big there, and
+    // the spread row shows it anyway; a wall is liquidity waiting further out.
+    let mut out: Vec<Wall> = near
+        .iter()
+        .skip(1)
+        .filter(|l| l.1 >= mean * ratio)
+        .map(|&(price, size)| Wall {
+            bid,
+            price,
+            size,
+            ratio: size / mean,
+        })
+        .collect();
+    out.sort_by(|a, b| b.ratio.total_cmp(&a.ratio));
+    out.truncate(max);
+    out
+}
+
+/// A wall with how long it has stood: a wall that lasts is an order someone
+/// means; one that flickers in and out may be bait (spoofing).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct WallMark {
+    pub wall: Wall,
+    pub age_ms: i64,
+}
+
+/// Remembers since when each wall has stood (by side and price).
+#[derive(Default, Debug)]
+pub struct WallTracker {
+    seen: std::collections::HashMap<(bool, i64), i64>,
+    marks: Vec<WallMark>,
+}
+
+impl WallTracker {
+    /// The walls now; ones gone are forgotten (a wall that comes back starts
+    /// again from zero).
+    pub fn update(&mut self, now_ms: i64, walls: &[Wall]) {
+        let key = |w: &Wall| (w.bid, (w.price * 1e8).round() as i64);
+        self.seen.retain(|k, _| walls.iter().any(|w| key(w) == *k));
+        self.marks = walls
+            .iter()
+            .map(|w| {
+                let since = *self.seen.entry(key(w)).or_insert(now_ms);
+                WallMark {
+                    wall: *w,
+                    age_ms: now_ms - since,
+                }
+            })
+            .collect();
+    }
+
+    pub fn marks(&self) -> &[WallMark] {
+        &self.marks
+    }
+
+    pub fn clear(&mut self) {
+        self.seen.clear();
+        self.marks.clear();
     }
 }
 
@@ -484,5 +576,60 @@ mod sequencing_tests {
         );
         let spot = serde_json::json!({"U":10,"u":12,"b":[],"a":[]});
         assert_eq!(parse_depth_diff(&spot).unwrap().prev_final_id, None);
+    }
+}
+
+#[cfg(test)]
+mod wall_tests {
+    use super::*;
+
+    #[test]
+    fn a_level_many_times_the_usual_is_a_wall_and_its_age_is_kept() {
+        let mut asks: Vec<(f64, f64)> = (0..30)
+            .map(|i| (100.0 + i as f64, 10.0 + (i % 3) as f64))
+            .collect();
+        asks[7].1 = 150.0;
+        asks[20].1 = 200.0;
+        asks[3].1 = 60.0;
+        let mean = asks.iter().map(|l| l.1).sum::<f64>() / 30.0;
+        let w = walls(&asks, false, WALL_RATIO, 5);
+        assert_eq!(w.len(), 2, "60 is not 5x the mean ({mean}): {w:?}");
+        assert_eq!((w[0].price, w[1].price), (120.0, 107.0), "strongest first");
+        assert!((w[0].ratio - 200.0 / mean).abs() < 1e-9, "{}", w[0].ratio);
+        // Dust does not make every real order a wall.
+        let mut dusty: Vec<(f64, f64)> = (0..40).map(|i| (i as f64, 0.0001)).collect();
+        for l in dusty.iter_mut().step_by(4) {
+            l.1 = 0.05;
+        }
+        dusty[9].1 = 3.0;
+        let d = walls(&dusty, true, WALL_RATIO, 5);
+        assert_eq!(
+            d.iter().map(|w| w.price).collect::<Vec<_>>(),
+            vec![9.0],
+            "{d:?}"
+        );
+        // Nothing stands out: no walls; too few levels: none.
+        let flat: Vec<(f64, f64)> = (0..30).map(|i| (i as f64, 10.0)).collect();
+        assert!(walls(&flat, true, WALL_RATIO, 5).is_empty());
+        assert!(walls(&asks[..4], false, WALL_RATIO, 5).is_empty());
+        assert_eq!(walls(&asks, false, WALL_RATIO, 1).len(), 1);
+        let mut top = flat.clone();
+        top[0].1 = 500.0;
+        assert!(
+            walls(&top, true, WALL_RATIO, 5).is_empty(),
+            "the best level is never a wall"
+        );
+        // Age: kept while the wall stands, reset when it goes and comes back.
+        let mut t = WallTracker::default();
+        t.update(1_000, &w);
+        t.update(5_000, &w);
+        assert_eq!(t.marks()[0].age_ms, 4_000);
+        t.update(6_000, &w[1..]);
+        assert_eq!(t.marks().len(), 1);
+        t.update(7_000, &w);
+        let big = t.marks().iter().find(|m| m.wall.price == 120.0).unwrap();
+        assert_eq!(big.age_ms, 0, "came back: a new wall");
+        let other = t.marks().iter().find(|m| m.wall.price == 107.0).unwrap();
+        assert_eq!(other.age_ms, 6_000);
     }
 }

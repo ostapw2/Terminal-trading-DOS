@@ -21,16 +21,35 @@ pub struct RiskLimits {
     /// User-toggled global kill switch.  When true, every action is
     /// rejected and running strategies receive no further events.
     pub kill_switch: bool,
+    /// Baskets (`crate::basket`): dollars one basket may hold, dollars all
+    /// open baskets may hold together, legs per basket.
+    #[serde(default = "d_basket_usd")]
+    pub max_basket_usd: f64,
+    #[serde(default = "d_basket_usd")]
+    pub max_baskets_usd: f64,
+    #[serde(default = "d_basket_legs")]
+    pub max_basket_legs: usize,
+}
+
+fn d_basket_usd() -> f64 {
+    1.0e9
+}
+fn d_basket_legs() -> usize {
+    crate::basket::MAX_LEGS
 }
 
 impl Default for RiskLimits {
     fn default() -> Self {
         Self {
             max_abs_position: 1.0e6,
-            max_open_orders: 100,
+            // Three full baskets of resting legs fit under it.
+            max_open_orders: 2_000,
             max_daily_loss: 1.0e9,
             max_drawdown_pct: 100.0,
             kill_switch: false,
+            max_basket_usd: d_basket_usd(),
+            max_baskets_usd: d_basket_usd(),
+            max_basket_legs: d_basket_legs(),
         }
     }
 }
@@ -70,31 +89,51 @@ fn reduces_risk(action: &Action, pos: &Position) -> bool {
 
 /// Pre-trade check against a candidate action.  Returns `Err(reason)` if
 /// the runtime should drop the action (and surface the reason in the UI).
+///
+/// `pos` is the position of the ledger the order goes to (the kill switch lets
+/// it shrink); `other_qty` is what the other ledger holds in the same symbol
+/// (the human's and the scalper's ledgers share one position limit), and
+/// `open_order_count` counts both ledgers.
 pub fn check_action(
     action: &Action,
     pos: &Position,
+    other_qty: f64,
     limits: &RiskLimits,
     open_order_count: usize,
 ) -> Result<(), String> {
     if limits.kill_switch && !reduces_risk(action, pos) {
-        return Err("kill switch active".into());
+        return Err(crate::i18n::pick("kill switch active", "стоп-кран увімкнено").into());
     }
     match action {
         Action::BuyMarket { qty, .. } | Action::BuyLimit { qty, .. } => {
-            let projected = (pos.qty + qty).abs();
+            let held = pos.qty + other_qty;
+            let projected = (held + qty).abs();
             if projected > limits.max_abs_position {
-                return Err(format!(
-                    "max position {} exceeded ({} → {})",
-                    limits.max_abs_position, pos.qty, projected
+                return Err(crate::i18n::pick(
+                    format!(
+                        "max position {} exceeded ({} → {})",
+                        limits.max_abs_position, held, projected
+                    ),
+                    format!(
+                        "перевищено макс. позицію {} ({} → {})",
+                        limits.max_abs_position, held, projected
+                    ),
                 ));
             }
         }
         Action::SellMarket { qty, .. } | Action::SellLimit { qty, .. } => {
-            let projected = (pos.qty - qty).abs();
+            let held = pos.qty + other_qty;
+            let projected = (held - qty).abs();
             if projected > limits.max_abs_position {
-                return Err(format!(
-                    "max position {} exceeded ({} → {})",
-                    limits.max_abs_position, pos.qty, projected
+                return Err(crate::i18n::pick(
+                    format!(
+                        "max position {} exceeded ({} → {})",
+                        limits.max_abs_position, held, projected
+                    ),
+                    format!(
+                        "перевищено макс. позицію {} ({} → {})",
+                        limits.max_abs_position, held, projected
+                    ),
                 ));
             }
         }
@@ -103,9 +142,12 @@ pub fn check_action(
     if matches!(action, Action::BuyLimit { .. } | Action::SellLimit { .. })
         && open_order_count >= limits.max_open_orders
     {
-        return Err(format!(
-            "max open orders {} reached",
-            limits.max_open_orders
+        return Err(crate::i18n::pick(
+            format!("max open orders {} reached", limits.max_open_orders),
+            format!(
+                "досягнуто макс. відкритих ордерів {}",
+                limits.max_open_orders
+            ),
         ));
     }
     Ok(())
@@ -171,12 +213,12 @@ mod tests {
         let k = killed();
         let long = pos(2.0);
         // Cancels and notes always pass.
-        assert!(check_action(&Action::CancelAll { symbol: "X".into() }, &long, &k, 0).is_ok());
+        assert!(check_action(&Action::CancelAll { symbol: "X".into() }, &long, 0.0, &k, 0).is_ok());
         // Closing (part of) the long is allowed; flipping or adding is not.
-        assert!(check_action(&sell(2.0), &long, &k, 0).is_ok());
-        assert!(check_action(&sell(1.0), &long, &k, 0).is_ok());
+        assert!(check_action(&sell(2.0), &long, 0.0, &k, 0).is_ok());
+        assert!(check_action(&sell(1.0), &long, 0.0, &k, 0).is_ok());
         assert!(
-            check_action(&sell(3.0), &long, &k, 0).is_err(),
+            check_action(&sell(3.0), &long, 0.0, &k, 0).is_err(),
             "would flip short"
         );
         let buy = Action::BuyMarket {
@@ -184,19 +226,38 @@ mod tests {
             qty: 1.0,
         };
         assert!(
-            check_action(&buy, &long, &k, 0).is_err(),
+            check_action(&buy, &long, 0.0, &k, 0).is_err(),
             "adding to a long"
         );
         // Short side mirrors.
-        assert!(check_action(&buy, &pos(-1.0), &k, 0).is_ok());
+        assert!(check_action(&buy, &pos(-1.0), 0.0, &k, 0).is_ok());
         // A fresh limit order is new exposure.
         let lim = Action::BuyLimit {
             symbol: "X".into(),
             qty: 1.0,
             limit: 1.0,
         };
-        assert!(check_action(&lim, &pos(-1.0), &k, 0).is_err());
+        assert!(check_action(&lim, &pos(-1.0), 0.0, &k, 0).is_err());
         // Flat: nothing to reduce.
-        assert!(check_action(&sell(1.0), &pos(0.0), &k, 0).is_err());
+        assert!(check_action(&sell(1.0), &pos(0.0), 0.0, &k, 0).is_err());
+        // The other ledger's position is not ours to reduce.
+        assert!(check_action(&sell(1.0), &pos(0.0), 5.0, &k, 0).is_err());
+    }
+
+    #[test]
+    fn the_position_limit_counts_both_ledgers() {
+        let lim = RiskLimits {
+            max_abs_position: 3.0,
+            ..RiskLimits::default()
+        };
+        let buy = |qty| Action::BuyMarket {
+            symbol: "X".into(),
+            qty,
+        };
+        assert!(check_action(&buy(1.0), &pos(1.0), 0.0, &lim, 0).is_ok());
+        let e = check_action(&buy(1.0), &pos(1.0), 1.5, &lim, 0).unwrap_err();
+        assert!(e.contains("max position"), "{e}");
+        // Opposite positions net out.
+        assert!(check_action(&buy(1.0), &pos(1.0), -2.0, &lim, 0).is_ok());
     }
 }

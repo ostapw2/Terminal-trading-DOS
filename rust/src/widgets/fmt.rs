@@ -40,6 +40,23 @@ pub fn fmt_price(v: f64) -> String {
     }
 }
 
+/// Any value (a formula, a spread, a range): [`fmt_price`]'s precision,
+/// with a sign; zero and negatives are numbers here, not "no price".
+pub fn fmt_value(v: f64) -> String {
+    if !v.is_finite() {
+        return "----".into();
+    }
+    if v == 0.0 {
+        return "0".into();
+    }
+    let s = fmt_price(v.abs());
+    if v < 0.0 {
+        format!("-{s}")
+    } else {
+        s
+    }
+}
+
 /// Fixed 10-column price for table cells (screener, order book).
 pub fn fmt_price_col(v: f64) -> String {
     if v >= 100.0 {
@@ -138,6 +155,29 @@ pub fn render_clipped<W: Widget>(frame: &mut Frame, w: W, r: Rect) {
     }
 }
 
+/// Is this char one a terminal would act on (or that can spoof text)?
+/// Control characters (incl. C1 and ESC), and bidi / zero-width formatting.
+pub fn is_unsafe_char(c: char) -> bool {
+    c.is_control()
+        || matches!(c, '\u{200B}'..='\u{200F}' | '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}' | '\u{FEFF}')
+}
+
+/// Last line of defence before a frame reaches the terminal: any cell whose
+/// text contains an unsafe char becomes `?`.  ratatui writes cell text as it
+/// is, so without this an escape sequence inside ANY displayed string (an
+/// agent-chosen list name, a symbol from the network) would be executed by the
+/// terminal (title changes, screen clears, ...).
+pub fn sanitize_buffer(buf: &mut ratatui::buffer::Buffer) -> usize {
+    let mut fixed = 0;
+    for cell in buf.content.iter_mut() {
+        if cell.symbol().chars().any(is_unsafe_char) {
+            cell.set_symbol("?");
+            fixed += 1;
+        }
+    }
+    fixed
+}
+
 /// `w` × `h` rect centred in `screen`, clamped so it never exceeds it.
 pub fn centered(screen: Rect, w: u16, h: u16) -> Rect {
     let w = w.min(screen.width);
@@ -165,6 +205,10 @@ mod tests {
     #[test]
     fn price_precision_follows_magnitude() {
         assert_eq!(fmt_price(0.0), "----");
+        assert_eq!(fmt_value(0.0), "0");
+        assert_eq!(fmt_value(-5.82), "-5.8200");
+        assert_eq!(fmt_value(f64::NAN), "----");
+        assert_eq!(fmt_value(65_000.123), "65000.12");
         assert_eq!(fmt_price(65_000.123), "65000.12");
         assert_eq!(fmt_price(0.00001234), "0.00001234");
     }

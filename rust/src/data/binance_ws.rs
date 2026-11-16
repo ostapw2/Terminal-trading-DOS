@@ -1,5 +1,5 @@
 //! Binance WebSocket streams — aggTrade, depth diff, bookTicker (selected /
-//! all symbols).
+//! all symbols), forceOrder (liquidations).
 //!
 //! All streams run on ONE connection loop, [`ws_loop`], so liveness policy is
 //! defined once (audit D2/R5):
@@ -194,11 +194,23 @@ fn spawn_stream(
     (stop_tx, thread)
 }
 
-fn host(venue_is_futures: bool) -> &'static str {
-    if venue_is_futures {
-        "wss://fstream.binance.com"
-    } else {
-        "wss://stream.binance.com"
+/// What a stream carries, for the Futures URL: since 2026 Binance serves
+/// USDⓈ-M market streams from two paths.  Book data (`depth`, `bookTicker`)
+/// is under `/public`; everything else (`aggTrade`, `miniTicker`,
+/// `forceOrder`) under `/market`.  The old `/ws` path still accepts every
+/// stream but sends book data only: the rest connects and stays silent
+/// (checked live 2026-10-11).  Spot has one path.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Feed {
+    Book,
+    Market,
+}
+
+fn host(venue_is_futures: bool, feed: Feed) -> &'static str {
+    match (venue_is_futures, feed) {
+        (false, _) => "wss://stream.binance.com",
+        (true, Feed::Book) => "wss://fstream.binance.com/public",
+        (true, Feed::Market) => "wss://fstream.binance.com/market",
     }
 }
 
@@ -246,7 +258,7 @@ fn parse_agg_trade(v: &serde_json::Value) -> Option<AggTrade> {
 pub fn connect_agg_trades(symbol: &str, venue_is_futures: bool) -> WsHandle {
     let url = format!(
         "{}/ws/{}@aggTrade",
-        host(venue_is_futures),
+        host(venue_is_futures, Feed::Market),
         symbol.to_lowercase()
     );
     let (tx, rx) = mpsc::channel::<AggTrade>();
@@ -291,7 +303,7 @@ impl DepthDiffHandle {
 pub fn connect_depth_diff(symbol: &str, venue_is_futures: bool) -> DepthDiffHandle {
     let url = format!(
         "{}/ws/{}@depth@100ms",
-        host(venue_is_futures),
+        host(venue_is_futures, Feed::Book),
         symbol.to_lowercase()
     );
     let (tx, rx) = mpsc::channel::<DepthDiffEvent>();
@@ -359,37 +371,79 @@ fn parse_book_ticker(v: &serde_json::Value) -> Option<(String, f64, i64)> {
     Some((sym.to_string(), (bid + ask) / 2.0, ts))
 }
 
-fn spawn_book_ticker(
+/// Most symbols one combined `bookTicker` connection carries; beyond that the
+/// all-symbols 1 Hz `!miniTicker@arr` stream is filtered instead (a URL with
+/// hundreds of streams gets unwieldy).
+pub const MAX_COMBINED_STREAMS: usize = 150;
+
+/// `(symbol, last_price, event_ms)` for every entry of an `!miniTicker@arr`
+/// payload (an array of 24h mini tickers, once a second).
+fn parse_mini_ticker_arr(v: &serde_json::Value) -> Vec<(String, f64, i64)> {
+    let Some(arr) = v.as_array() else {
+        return Vec::new();
+    };
+    arr.iter()
+        .filter_map(|t| {
+            let sym = t.get("s")?.as_str()?;
+            let price = parse_f64(t, "c")?;
+            if price <= 0.0 {
+                return None;
+            }
+            let ts = t.get("E").and_then(|x| x.as_i64()).unwrap_or_else(now_ms);
+            Some((sym.to_string(), price, ts))
+        })
+        .collect()
+}
+
+/// The stream URL for a set of symbols.  Spot's all-symbols `!bookTicker`
+/// stream accepts the connection and then sends NOTHING (it was removed), so
+/// prices come from per-symbol `<symbol>@bookTicker` streams combined in one
+/// connection, or from `!miniTicker@arr` when there are too many symbols.
+/// The bool says whether the combined `bookTicker` form is used.
+pub fn price_stream_url(symbols: &[String], venue_is_futures: bool) -> (String, bool) {
+    if symbols.len() <= MAX_COMBINED_STREAMS && !symbols.is_empty() {
+        let streams: Vec<String> = symbols
+            .iter()
+            .map(|s| format!("{}@bookTicker", s.to_ascii_lowercase()))
+            .collect();
+        let host = host(venue_is_futures, Feed::Book);
+        (format!("{host}/stream?streams={}", streams.join("/")), true)
+    } else {
+        let host = host(venue_is_futures, Feed::Market);
+        (format!("{host}/ws/!miniTicker@arr"), false)
+    }
+}
+
+fn spawn_price_stream(
     name: &str,
-    venue_is_futures: bool,
-    keep: impl Fn(&str) -> bool + Send + 'static,
+    url: String,
+    extract: impl Fn(&serde_json::Value) -> Vec<(String, f64, i64)> + Send + 'static,
 ) -> MiniTickerHandle {
-    let url = format!("{}/ws/!bookTicker", host(venue_is_futures));
     let (tx, rx) = mpsc::channel::<MiniTickerMsg>();
     let (stop_tx, thread) = spawn_stream(name.to_string(), url, move |sig| {
-        let msg = match sig {
-            Signal::Connected => MiniTickerMsg::Connected,
-            Signal::Disconnected(r) => MiniTickerMsg::Disconnected(r),
+        match sig {
+            Signal::Connected => {
+                if tx.send(MiniTickerMsg::Connected).is_err() {
+                    return Flow::Stop;
+                }
+            }
+            Signal::Disconnected(r) => {
+                if tx.send(MiniTickerMsg::Disconnected(r)).is_err() {
+                    return Flow::Stop;
+                }
+            }
             Signal::Text(text) => {
-                // ~5000 events/s arrive; cheap-reject on the symbol first.
                 let Ok(v) = serde_json::from_str::<serde_json::Value>(&text) else {
                     return Flow::Continue;
                 };
-                match v.get("s").and_then(|s| s.as_str()) {
-                    Some(s) if keep(s) => {}
-                    _ => return Flow::Continue,
+                for (sym, price, ts) in extract(&v) {
+                    if tx.send(MiniTickerMsg::Tick(sym, price, ts)).is_err() {
+                        return Flow::Stop;
+                    }
                 }
-                let Some((sym, mid, ts)) = parse_book_ticker(&v) else {
-                    return Flow::Continue;
-                };
-                MiniTickerMsg::Tick(sym, mid, ts)
             }
-        };
-        if tx.send(msg).is_err() {
-            Flow::Stop
-        } else {
-            Flow::Continue
         }
+        Flow::Continue
     });
     MiniTickerHandle {
         rx,
@@ -398,20 +452,159 @@ fn spawn_book_ticker(
     }
 }
 
-/// `!bookTicker` filtered to `symbols` in the worker thread, so the
-/// main-loop drain stays cheap.
+/// Mid prices of `symbols` (sub-second): one combined connection of
+/// `<symbol>@bookTicker` streams; see [`price_stream_url`].
 pub fn connect_book_tickers(symbols: Vec<String>, venue_is_futures: bool) -> MiniTickerHandle {
+    let mut symbols: Vec<String> = symbols
+        .into_iter()
+        .map(|s| s.to_ascii_uppercase())
+        .collect();
+    symbols.sort();
+    symbols.dedup();
+    let (url, combined) = price_stream_url(&symbols, venue_is_futures);
     let wanted: std::collections::HashSet<String> = symbols.into_iter().collect();
-    spawn_book_ticker("ws-booktickers", venue_is_futures, move |s| {
-        wanted.contains(s)
+    spawn_price_stream("ws-booktickers", url, move |v| {
+        if combined {
+            // {"stream": "btcusdt@bookTicker", "data": {...}}
+            let data = v.get("data").unwrap_or(v);
+            parse_book_ticker(data).into_iter().collect()
+        } else {
+            parse_mini_ticker_arr(v)
+                .into_iter()
+                .filter(|(s, _, _)| wanted.contains(s))
+                .collect()
+        }
     })
 }
 
-/// `!bookTicker` for the Screener — every USDT symbol, unfiltered otherwise.
+/// Every USDT symbol for the Screener.  Futures still has the all-symbols
+/// `!bookTicker`; Spot does not (see [`price_stream_url`]), so it uses
+/// `!miniTicker@arr` (last price, once a second).
 pub fn connect_all_book_tickers(venue_is_futures: bool) -> MiniTickerHandle {
-    spawn_book_ticker("ws-screener-book", venue_is_futures, |s| {
-        s.ends_with("USDT")
-    })
+    if venue_is_futures {
+        let url = format!("{}/ws/!bookTicker", host(true, Feed::Book));
+        spawn_price_stream("ws-screener-book", url, |v| {
+            parse_book_ticker(v)
+                .filter(|(s, _, _)| s.ends_with("USDT"))
+                .into_iter()
+                .collect()
+        })
+    } else {
+        let url = format!("{}/ws/!miniTicker@arr", host(false, Feed::Market));
+        spawn_price_stream("ws-screener-book", url, |v| {
+            parse_mini_ticker_arr(v)
+                .into_iter()
+                .filter(|(s, _, _)| s.ends_with("USDT"))
+                .collect()
+        })
+    }
+}
+
+// ── all-market tickers (movers) ──────────────────────────────────────────
+
+pub struct MarketTickHandle {
+    pub rx: Receiver<Vec<crate::movers::Tick>>,
+    pub stop_tx: Sender<()>,
+    pub thread: Option<JoinHandle<()>>,
+}
+
+impl MarketTickHandle {
+    pub fn is_alive(&self) -> bool {
+        thread_alive(&self.thread)
+    }
+}
+
+/// Every symbol's last price and 24h quote volume from one
+/// `!miniTicker@arr` payload.
+fn parse_market_ticks(v: &serde_json::Value) -> Vec<crate::movers::Tick> {
+    let Some(arr) = v.as_array() else {
+        return Vec::new();
+    };
+    arr.iter()
+        .filter_map(|t| {
+            Some(crate::movers::Tick {
+                symbol: t.get("s")?.as_str()?.to_string(),
+                price: parse_f64(t, "c")?,
+                quote_volume: parse_f64(t, "q")?,
+                time_ms: t.get("E").and_then(|x| x.as_i64()).unwrap_or_else(now_ms),
+            })
+        })
+        .collect()
+}
+
+/// The whole market once a second (`!miniTicker@arr`): only the symbols that
+/// changed are sent.  Feeds `crate::movers`.
+pub fn connect_market_tickers(venue_is_futures: bool) -> MarketTickHandle {
+    let url = format!(
+        "{}/ws/!miniTicker@arr",
+        host(venue_is_futures, Feed::Market)
+    );
+    let (tx, rx) = mpsc::channel::<Vec<crate::movers::Tick>>();
+    let (stop_tx, thread) = spawn_stream("ws-movers".into(), url, move |sig| {
+        if let Signal::Text(text) = sig {
+            let ticks = serde_json::from_str::<serde_json::Value>(&text)
+                .map(|v| parse_market_ticks(&v))
+                .unwrap_or_default();
+            if !ticks.is_empty() && tx.send(ticks).is_err() {
+                return Flow::Stop;
+            }
+        }
+        Flow::Continue
+    });
+    MarketTickHandle {
+        rx,
+        stop_tx,
+        thread,
+    }
+}
+
+// ── forceOrder (liquidations) ────────────────────────────────────────────
+
+pub enum LiqMsg {
+    Connected,
+    Disconnected(String),
+    Liq(crate::data::liquidations::Liquidation),
+}
+
+pub struct LiqHandle {
+    pub rx: Receiver<LiqMsg>,
+    pub stop_tx: Sender<()>,
+    pub thread: Option<JoinHandle<()>>,
+}
+
+impl LiqHandle {
+    pub fn is_alive(&self) -> bool {
+        thread_alive(&self.thread)
+    }
+}
+
+/// Every liquidation on Binance USDⓈ-M Futures (`!forceOrder@arr`; at most
+/// the largest one per symbol per second).  Quiet markets may stay silent
+/// longer than the idle limit: the loop then simply reconnects.
+pub fn connect_liquidations() -> LiqHandle {
+    let url = format!("{}/ws/!forceOrder@arr", host(true, Feed::Market));
+    let (tx, rx) = mpsc::channel::<LiqMsg>();
+    let (stop_tx, thread) = spawn_stream("ws-liq".into(), url, move |sig| {
+        let msgs = match sig {
+            Signal::Connected => vec![LiqMsg::Connected],
+            Signal::Disconnected(why) => vec![LiqMsg::Disconnected(why)],
+            Signal::Text(text) => crate::data::liquidations::parse_force_orders(&text)
+                .into_iter()
+                .map(LiqMsg::Liq)
+                .collect(),
+        };
+        for m in msgs {
+            if tx.send(m).is_err() {
+                return Flow::Stop;
+            }
+        }
+        Flow::Continue
+    });
+    LiqHandle {
+        rx,
+        stop_tx,
+        thread,
+    }
 }
 
 #[cfg(test)]
@@ -469,5 +662,70 @@ mod tests {
             t0.elapsed() < Duration::from_secs(2),
             "stop must interrupt backoff sleep"
         );
+    }
+
+    #[test]
+    fn spot_prices_come_from_per_symbol_streams_never_the_dead_all_symbols_one() {
+        let syms = vec!["BTCUSDT".to_string(), "ETHUSDT".to_string()];
+        let (url, combined) = price_stream_url(&syms, false);
+        assert!(combined);
+        assert_eq!(
+            url,
+            "wss://stream.binance.com/stream?streams=btcusdt@bookTicker/ethusdt@bookTicker"
+        );
+        assert!(
+            !url.contains("!bookTicker"),
+            "removed from Spot: it connects and stays silent"
+        );
+        let (fut, _) = price_stream_url(&syms, true);
+        assert!(fut.starts_with("wss://fstream.binance.com/public/stream?streams="));
+        // Too many symbols (or none): the 1 Hz all-symbols stream, filtered.
+        let many: Vec<String> = (0..MAX_COMBINED_STREAMS + 1)
+            .map(|i| format!("S{i}USDT"))
+            .collect();
+        let (url, combined) = price_stream_url(&many, false);
+        assert!(!combined && url.ends_with("/ws/!miniTicker@arr"));
+        assert!(!price_stream_url(&[], false).1);
+        let (fut, _) = price_stream_url(&many, true);
+        assert_eq!(fut, "wss://fstream.binance.com/market/ws/!miniTicker@arr");
+    }
+
+    #[test]
+    fn market_ticks_carry_price_and_quote_volume() {
+        let v = json!([
+            {"e":"24hrMiniTicker","E":1700000000000_i64,"s":"BTCUSDT","c":"65000.5","q":"123456.7"},
+            {"e":"24hrMiniTicker","s":"BAD","c":"x","q":"1"}
+        ]);
+        let t = parse_market_ticks(&v);
+        assert_eq!(t.len(), 1);
+        assert_eq!((t[0].price, t[0].quote_volume), (65000.5, 123456.7));
+        assert_eq!(t[0].time_ms, 1_700_000_000_000);
+    }
+
+    #[test]
+    fn futures_streams_take_the_path_that_still_sends() {
+        // Book data under /public, the rest under /market; Spot unchanged.
+        assert_eq!(host(true, Feed::Book), "wss://fstream.binance.com/public");
+        assert_eq!(host(true, Feed::Market), "wss://fstream.binance.com/market");
+        assert_eq!(host(false, Feed::Book), host(false, Feed::Market));
+    }
+
+    #[test]
+    fn combined_and_array_payloads_parse() {
+        let wrapped =
+            json!({"stream":"btcusdt@bookTicker","data":{"s":"BTCUSDT","b":"100.0","a":"102.0"}});
+        let data = wrapped.get("data").unwrap();
+        let (s, mid, _) = parse_book_ticker(data).unwrap();
+        assert_eq!((s.as_str(), mid), ("BTCUSDT", 101.0));
+        let arr = json!([
+            {"e":"24hrMiniTicker","E":1700000000000_i64,"s":"BNBBTC","c":"0.009"},
+            {"e":"24hrMiniTicker","E":1700000000001_i64,"s":"ETHUSDT","c":"2494.5"},
+            {"s":"BADUSDT","c":"0"},
+            {"s":"NOPRICE"}
+        ]);
+        let v = parse_mini_ticker_arr(&arr);
+        assert_eq!(v.len(), 2);
+        assert_eq!(v[1], ("ETHUSDT".to_string(), 2494.5, 1_700_000_000_001));
+        assert!(parse_mini_ticker_arr(&json!({"not": "an array"})).is_empty());
     }
 }

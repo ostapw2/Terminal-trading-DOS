@@ -43,7 +43,14 @@ pub fn render(frame: &mut Frame, screen: Rect, modal: &Modal, palette: &Palette)
     // Inner content: body + spacer + button face + button shadow row.
     let inner_h = body_h + 1 /*spacer*/ + button::HEIGHT;
     let total_h = inner_h + 4; // top/bot border + 1 padding each
-    let total_w: u16 = 50;
+                               // As wide as its longest line (at least 50), within the screen.
+    let widest = modal
+        .body
+        .iter()
+        .map(|l| l.chars().count())
+        .max()
+        .unwrap_or(0) as u16;
+    let total_w: u16 = (widest + 8).clamp(50, screen.width.saturating_sub(4).clamp(50, 110));
 
     let area = centered(screen, total_w, total_h);
 

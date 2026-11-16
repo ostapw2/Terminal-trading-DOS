@@ -47,6 +47,11 @@ pub struct Fill {
     /// immediate market fill that never rested in the book.
     #[serde(default)]
     pub order_id: u64,
+    /// The fee this fill cost (quote currency): maker for a limit that
+    /// rested until a tick crossed it, taker for a market or marketable one.
+    /// The exchange mirror reports no fee (the exchange keeps its own).
+    #[serde(default)]
+    pub fee: f64,
 }
 
 /// Strategy-visible position snapshot.  `qty` is signed: long > 0, short < 0.

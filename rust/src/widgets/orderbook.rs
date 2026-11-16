@@ -6,7 +6,10 @@
 //! 60/40 horizontal split — book on the left (asks top, spread row,
 //! bids bottom) and recent trades feed on the right.
 
-use crate::widgets::fmt::{fmt_clock_ms, fmt_price_col, fmt_qty_col, render_clipped, BEAR, BULL};
+use crate::i18n::pick;
+use crate::widgets::fmt::{
+    fmt_clock_ms, fmt_price_col, fmt_qty_col, render_clipped, truncate, BEAR, BULL,
+};
 use std::collections::VecDeque;
 
 use ratatui::{
@@ -18,11 +21,17 @@ use ratatui::{
 };
 
 use crate::data::binance::AggTrade;
-use crate::data::orderbook::OrderBookSnapshot;
+use crate::data::orderbook::{OrderBookSnapshot, WallMark};
+use crate::gfx::{self, Canvas};
 use crate::tokens::Palette;
 
 pub struct OrderBookLayout {
     pub area: Rect,
+    /// The ladder's rows: the row, whether it is a bid, its price (the
+    /// bucket's), so a click can rest a limit there.
+    pub rows: Vec<(Rect, bool, f64)>,
+    /// Price per row at the current zoom (half of it is "the same price").
+    pub bucket: f64,
 }
 
 /// `zoom` is a multiplier over the native tick size (1, 5, 10, 50, 100).
@@ -40,6 +49,9 @@ pub struct LoadDiag {
     pub diff_ws_open: bool,
     pub trade_ws_open: bool,
     pub trades_received: usize,
+    /// Binance REST paused (refused or near its limit): seconds left.  The
+    /// book needs one REST snapshot to start.
+    pub paused_secs: Option<i64>,
 }
 
 pub fn render(
@@ -53,6 +65,8 @@ pub fn render(
     stale_secs: u64,
     show_trades: bool,
     diag: LoadDiag,
+    walls: &[WallMark],
+    orders: &[(bool, f64, f64)],
     palette: &Palette,
 ) -> OrderBookLayout {
     // ── Title bar with live mid / spread / imbalance ──
@@ -77,22 +91,26 @@ pub fn render(
         .constraints([Constraint::Length(2), Constraint::Min(4)])
         .split(inner);
     render_header(frame, rows[0], snapshot, palette);
+    render_walls_line(frame, rows[0], snapshot, walls, palette);
 
-    if show_trades {
+    let (ladder, bucket) = if show_trades {
         let cols = Layout::default()
             .direction(Direction::Horizontal)
             .constraints([Constraint::Percentage(60), Constraint::Percentage(40)])
             .split(rows[1]);
-        render_book(
+        let l = render_book(
             frame,
             cols[0],
             snapshot,
             zoom,
             last_trade_at_price,
             diag,
+            walls,
+            orders,
             palette,
         );
         render_trades(frame, cols[1], recent_trades, palette);
+        l
     } else {
         render_book(
             frame,
@@ -101,11 +119,37 @@ pub fn render(
             zoom,
             last_trade_at_price,
             diag,
+            walls,
+            orders,
             palette,
+        )
+    };
+
+    OrderBookLayout {
+        area,
+        rows: ladder,
+        bucket,
+    }
+}
+
+/// Is one of our orders resting at this bucket's price?
+fn own_order_at(orders: &[(bool, f64, f64)], price: f64, bucket: f64) -> bool {
+    orders
+        .iter()
+        .any(|(_, p, _)| (p - price).abs() < bucket / 2.0)
+}
+
+/// `◆` in the row's first cell: one of our orders rests here.
+fn mark_own_order(frame: &mut Frame, row: Rect, palette: &Palette) {
+    if let Some(c) = frame.buffer_mut().cell_mut((row.x, row.y)) {
+        c.set_char('◆');
+        c.set_style(
+            Style::default()
+                .fg(palette.accent)
+                .bg(palette.bg)
+                .add_modifier(Modifier::BOLD),
         );
     }
-
-    OrderBookLayout { area }
 }
 
 fn build_title(
@@ -115,7 +159,10 @@ fn build_title(
     stale_secs: u64,
 ) -> String {
     let stale_tag = if stale_secs > 3 {
-        format!("  ⚠ STALLED {}s", stale_secs)
+        pick(
+            format!("  ⚠ STALLED {}s", stale_secs),
+            format!("  ⚠ ЗАВИС {} с", stale_secs),
+        )
     } else {
         String::new()
     };
@@ -129,16 +176,31 @@ fn build_title(
                 } else {
                     0.0
                 };
-                format!(
-                    " Order Book — {}    Mid {:.4}    Spread {:.4} ({:.1} bp)    zoom x{}{} ",
-                    ticker, mid, spread, bp, zoom, stale_tag
+                pick(
+                    format!(
+                        " Order Book — {}    Mid {:.4}    Spread {:.4} ({:.1} bp)    zoom x{}{} ",
+                        ticker, mid, spread, bp, zoom, stale_tag
+                    ),
+                    format!(
+                        " Стакан — {}    Mid {:.4}    Спред {:.4} ({:.1} б.п.)    масштаб x{}{} ",
+                        ticker, mid, spread, bp, zoom, stale_tag
+                    ),
                 )
             }
-            _ => format!(" Order Book — {}    zoom x{}{} ", ticker, zoom, stale_tag),
+            _ => pick(
+                format!(" Order Book — {}    zoom x{}{} ", ticker, zoom, stale_tag),
+                format!(" Стакан — {}    масштаб x{}{} ", ticker, zoom, stale_tag),
+            ),
         },
-        None => format!(
-            " Order Book — {} (loading…)    zoom x{}{} ",
-            ticker, zoom, stale_tag
+        None => pick(
+            format!(
+                " Order Book — {} (loading…)    zoom x{}{} ",
+                ticker, zoom, stale_tag
+            ),
+            format!(
+                " Стакан — {} (завантаження…)    масштаб x{}{} ",
+                ticker, zoom, stale_tag
+            ),
         ),
     }
 }
@@ -167,41 +229,67 @@ fn render_header(
     let buf = frame.buffer_mut();
     let bar_w = area.width;
     let bid_cells = (bar_w as f64 * (bid_total / total)).round() as u16;
-    let bid_label = format!(" Bid {}% ({}) ", bid_pct, fmt_qty_col(bid_total).trim());
-    let ask_label = format!(" Ask {}% ({}) ", ask_pct, fmt_qty_col(ask_total).trim());
+    let bid_label = format!(
+        " {} {}% ({}) ",
+        pick("Bid", "Купівля"),
+        bid_pct,
+        fmt_qty_col(bid_total).trim()
+    );
+    let ask_label = format!(
+        " {} {}% ({}) ",
+        pick("Ask", "Продаж"),
+        ask_pct,
+        fmt_qty_col(ask_total).trim()
+    );
 
-    // Pre-fill row.
-    for x in 0..bar_w {
-        if let Some(c) = buf.cell_mut((area.x + x, bar_y)) {
-            c.set_char(' ');
-            let bg = if x < bid_cells { BULL } else { BEAR };
-            c.set_style(
-                Style::default()
-                    .fg(palette.bg)
-                    .bg(bg)
-                    .add_modifier(Modifier::BOLD),
-            );
+    // In pixels the split is exact; the labels stay text on top.
+    let bar_rect = Rect {
+        x: area.x,
+        y: bar_y,
+        width: bar_w,
+        height: 1,
+    };
+    let style_at = |x: u16| {
+        Style::default()
+            .fg(palette.bg)
+            .bg(if x < bid_cells { BULL } else { BEAR })
+            .add_modifier(Modifier::BOLD)
+    };
+    if let Some((pw, ph)) = gfx::plot_px(bar_rect) {
+        let mut cv = Canvas::new(pw, ph, palette.bg);
+        let (bull, bear) = (cv.ink(BULL), cv.ink(BEAR));
+        let split = (pw as f64 * (bid_total / total)).round() as i64;
+        cv.fill(0, 0, split, ph as i64, bull);
+        cv.fill(split, 0, pw as i64, ph as i64, bear);
+        gfx::submit(buf, bar_rect, cv);
+    } else {
+        for x in 0..bar_w {
+            if let Some(c) = buf.cell_mut((area.x + x, bar_y)) {
+                c.set_char(' ');
+                c.set_style(style_at(x));
+            }
         }
     }
-    // Overlay labels: bid_label left-anchored, ask_label right-anchored.
-    for (i, ch) in bid_label.chars().enumerate() {
-        let x = area.x + 1 + i as u16;
-        if x >= area.x + bar_w {
-            break;
-        }
-        if let Some(c) = buf.cell_mut((x, bar_y)) {
-            c.set_char(ch);
-        }
-    }
+    // Labels: bid left-anchored, ask right-anchored (text over the image).
     let ask_w = ask_label.chars().count() as u16;
-    let ask_start_x = area.x + bar_w.saturating_sub(ask_w + 1);
-    for (i, ch) in ask_label.chars().enumerate() {
-        let x = ask_start_x + i as u16;
-        if x >= area.x + bar_w {
-            break;
+    let ask_start = bar_w.saturating_sub(ask_w + 1);
+    let labels = bid_label
+        .chars()
+        .enumerate()
+        .map(|(i, ch)| (1 + i as u16, ch))
+        .chain(
+            ask_label
+                .chars()
+                .enumerate()
+                .map(|(i, ch)| (ask_start + i as u16, ch)),
+        );
+    for (dx, ch) in labels {
+        if dx >= bar_w {
+            continue;
         }
-        if let Some(c) = buf.cell_mut((x, bar_y)) {
+        if let Some(c) = buf.cell_mut((area.x + dx, bar_y)) {
             c.set_char(ch);
+            c.set_style(style_at(dx));
         }
     }
 }
@@ -213,12 +301,21 @@ fn render_book(
     zoom: u32,
     last_trade_at_price: Option<f64>,
     diag: LoadDiag,
+    walls: &[WallMark],
+    orders: &[(bool, f64, f64)],
     palette: &Palette,
-) {
+) -> (Vec<(Rect, bool, f64)>, f64) {
+    let mut ladder: Vec<(Rect, bool, f64)> = Vec::new();
     if area.width < 30 || area.height < 6 {
-        return;
+        return (ladder, 0.0);
     }
-    let header = format!("  {:>10}  {:>9}  {:>9}  DEPTH", "PRICE", "SIZE", "CUM");
+    let header = format!(
+        "  {:>10}  {:>9}  {:>9}  {}",
+        pick("PRICE", "ЦІНА"),
+        pick("SIZE", "ОБСЯГ"),
+        pick("CUM", "РАЗОМ"),
+        pick("DEPTH", "ГЛИБИНА")
+    );
     render_clipped(
         frame,
         Paragraph::new(header).style(
@@ -238,7 +335,17 @@ fn render_book(
     let snap = match snap {
         Some(s) => s,
         None => {
-            let line1 = "  (waiting for depth stream…)".to_string();
+            let line1 = match diag.paused_secs {
+                Some(s) => pick(
+                    format!("  Binance limits requests: the book starts in {s} s"),
+                    format!("  Binance обмежує запити: стакан почнеться за {s} с"),
+                ),
+                None => pick(
+                    "  (waiting for the depth stream…)",
+                    "  (чекаю потік глибини…)",
+                )
+                .to_string(),
+            };
             let line2 = format!(
                 "  diag: ws-diff={}  ws-trades={}  seed={}  buf={}  trades_rx={}",
                 if diag.diff_ws_open { "open" } else { "OFF" },
@@ -271,7 +378,7 @@ fn render_book(
                     height: 1,
                 },
             );
-            return;
+            return (ladder, 0.0);
         }
     };
 
@@ -303,6 +410,12 @@ fn render_book(
         .fold(0.0_f64, f64::max)
         .max(1e-9);
     let depth_w = (area.width as usize).saturating_sub(38).max(4);
+    // Depth bars in pixels when the terminal shows images.
+    let pixels = gfx::cell_px().is_some() && area.width > 40;
+    let mut ask_rows: Vec<DepthRow> = Vec::new();
+    let mut bid_rows: Vec<DepthRow> = Vec::new();
+    let mut ask_walls: Vec<(u16, WallMark)> = Vec::new();
+    let mut bid_walls: Vec<(u16, WallMark)> = Vec::new();
 
     // Asks: top-down display, but data is ascending → reverse top portion.
     let take_asks: Vec<&(f64, f64)> = agg.asks.iter().take(max_asks).collect();
@@ -322,6 +435,7 @@ fn render_book(
         let (price, size) = *take_asks[i];
         let cum = ask_cum_for_pos[i];
         let flash = matches!(last_trade_at_price, Some(p) if (p - price).abs() < bucket / 2.0);
+        let wall = wall_at(walls, false, price, bucket);
         render_book_row(
             frame,
             Rect {
@@ -337,23 +451,50 @@ fn render_book(
             depth_w,
             max_ask_size,
             flash,
+            wall,
             palette,
+            pixels,
         );
+        let row = Rect {
+            x: area.x,
+            y,
+            width: area.width,
+            height: 1,
+        };
+        if own_order_at(orders, price, bucket) {
+            mark_own_order(frame, row, palette);
+        }
+        ladder.push((row, false, price));
+        ask_rows.push(DepthRow {
+            y,
+            frac: (size / max_ask_size).clamp(0.0, 1.0),
+            color: BEAR,
+            flash,
+            wall: wall.is_some(),
+        });
+        if let Some(m) = wall {
+            ask_walls.push((y, m));
+        }
         y += 1;
     }
+    if pixels {
+        depth_image(frame, area, depth_w, &ask_rows, palette);
+    }
+    paint_wall_labels(frame, area, &ask_rows, &ask_walls);
 
     // Spread row.
     if y < area.y + area.height {
         let spread_str = match (snap.best_bid(), snap.best_ask()) {
             (Some(b), Some(a)) => format!(
-                "  ─── {} / {}   spread {:.6}   tick {:.6} (x{}) ───",
+                "  ─── {} / {}   {} {:.6}   tick {:.6} (x{}) ───",
                 fmt_price_col(b),
                 fmt_price_col(a),
+                pick("spread", "спред"),
                 a - b,
                 tick,
                 zoom
             ),
-            _ => "  ─── (no top bid/ask) ───".into(),
+            _ => pick("  ─── (no top bid/ask) ───", "  ─── (немає кращих цін) ───").into(),
         };
         render_clipped(
             frame,
@@ -381,6 +522,7 @@ fn render_book(
         }
         bid_acc += size;
         let flash = matches!(last_trade_at_price, Some(p) if (p - price).abs() < bucket / 2.0);
+        let wall = wall_at(walls, true, *price, bucket);
         render_book_row(
             frame,
             Rect {
@@ -396,10 +538,220 @@ fn render_book(
             depth_w,
             max_bid_size,
             flash,
+            wall,
             palette,
+            pixels,
         );
+        let row = Rect {
+            x: area.x,
+            y,
+            width: area.width,
+            height: 1,
+        };
+        if own_order_at(orders, *price, bucket) {
+            mark_own_order(frame, row, palette);
+        }
+        ladder.push((row, true, *price));
+        bid_rows.push(DepthRow {
+            y,
+            frac: (size / max_bid_size).clamp(0.0, 1.0),
+            color: BULL,
+            flash,
+            wall: wall.is_some(),
+        });
+        if let Some(m) = wall {
+            bid_walls.push((y, m));
+        }
         y += 1;
     }
+    if pixels {
+        depth_image(frame, area, depth_w, &bid_rows, palette);
+    }
+    paint_wall_labels(frame, area, &bid_rows, &bid_walls);
+    (ladder, bucket)
+}
+
+/// One book row's depth bar, for the pixel version.
+struct DepthRow {
+    y: u16,
+    frac: f64,
+    color: Color,
+    flash: bool,
+    /// A wall: the whole row is tinted in the side's darker colour.
+    wall: bool,
+}
+
+/// The wall's mark at the right end of its row: how many times the usual
+/// size, how long it has stood.  Painted after the depth image (on top).
+fn paint_wall_labels(frame: &mut Frame, area: Rect, rows: &[DepthRow], walls: &[(u16, WallMark)]) {
+    let buf = frame.buffer_mut();
+    for (y, m) in walls {
+        let color = rows
+            .iter()
+            .find(|r| r.y == *y)
+            .map_or(if m.wall.bid { BULL } else { BEAR }, |r| r.color);
+        let label = format!(" ◆ x{:.1} {} ", m.wall.ratio, fmt_age(m.age_ms));
+        let w = label.chars().count() as u16;
+        if area.width < 36 + w {
+            continue;
+        }
+        let x0 = area.x + area.width - w;
+        for (i, ch) in label.chars().enumerate() {
+            if let Some(c) = buf.cell_mut((x0 + i as u16, *y)) {
+                c.set_char(ch);
+                c.set_style(
+                    Style::default()
+                        .fg(Color::Black)
+                        .bg(color)
+                        .add_modifier(Modifier::BOLD),
+                );
+            }
+        }
+    }
+}
+
+/// The wall standing at this row's price, if any.
+fn wall_at(walls: &[WallMark], bid: bool, price: f64, bucket: f64) -> Option<WallMark> {
+    walls
+        .iter()
+        .find(|m| m.wall.bid == bid && (m.wall.price - price).abs() < bucket / 2.0)
+        .copied()
+}
+
+/// How long a wall has stood: `12s`, `4m`, `2h`.
+pub fn fmt_age(ms: i64) -> String {
+    let s = (ms / 1000).max(0);
+    match s {
+        0..=59 => format!("{s}s"),
+        60..=3599 => format!("{}m", s / 60),
+        _ => format!("{}h", s / 3600),
+    }
+}
+
+/// The second header row: the strongest wall of each side, in words.
+fn render_walls_line(
+    frame: &mut Frame,
+    area: Rect,
+    snap: Option<&OrderBookSnapshot>,
+    walls: &[WallMark],
+    palette: &Palette,
+) {
+    if area.height < 2 || area.width < 20 {
+        return;
+    }
+    let mid = snap.and_then(|s| s.mid());
+    let side = |bid: bool| -> Option<String> {
+        let m = walls
+            .iter()
+            .filter(|m| m.wall.bid == bid)
+            .max_by(|a, b| a.wall.ratio.total_cmp(&b.wall.ratio))?;
+        let dist = mid
+            .filter(|m| *m > 0.0)
+            .map(|mid| format!(" {:+.2}%", (m.wall.price / mid - 1.0) * 100.0))
+            .unwrap_or_default();
+        Some(format!(
+            "{} {} x{:.1}{dist} {}",
+            if bid {
+                pick("bid", "куп.")
+            } else {
+                pick("ask", "прод.")
+            },
+            fmt_price_col(m.wall.price).trim(),
+            m.wall.ratio,
+            fmt_age(m.age_ms)
+        ))
+    };
+    let parts: Vec<String> = [side(false), side(true)].into_iter().flatten().collect();
+    let (text, style) = if parts.is_empty() {
+        (
+            pick(
+                format!(
+                    " no walls (a level {}x the usual size or more)",
+                    crate::data::orderbook::WALL_RATIO
+                ),
+                format!(
+                    " стін немає (рівень у {}x звичайного обсягу й більше)",
+                    crate::data::orderbook::WALL_RATIO
+                ),
+            ),
+            Style::default().fg(palette.muted).bg(palette.bg),
+        )
+    } else {
+        (
+            format!(" ◆ {}: {}", pick("walls", "стіни"), parts.join("   ")),
+            Style::default()
+                .fg(palette.accent)
+                .bg(palette.bg)
+                .add_modifier(Modifier::BOLD),
+        )
+    };
+    render_clipped(
+        frame,
+        Paragraph::new(Span::styled(
+            truncate(&text, area.width as usize).to_string(),
+            style,
+        )),
+        Rect {
+            y: area.y + 1,
+            height: 1,
+            ..area
+        },
+    );
+}
+
+/// The DEPTH column of a block of consecutive rows as one image: bars to the
+/// exact pixel, a hairline gap between rows, the last-trade row tinted.
+fn depth_image(
+    frame: &mut Frame,
+    area: Rect,
+    depth_w: usize,
+    rows: &[DepthRow],
+    palette: &Palette,
+) {
+    let x = area.x + 36;
+    let width = (depth_w as u16).min((area.x + area.width).saturating_sub(x));
+    bar_image(frame, x, width, rows, palette);
+}
+
+/// Horizontal bars for consecutive rows as one image, `width` cells wide at
+/// column `x`: exact to the pixel, a hairline gap between rows, tinted rows.
+fn bar_image(frame: &mut Frame, x: u16, width: u16, rows: &[DepthRow], palette: &Palette) {
+    let (Some(first), Some(last)) = (
+        rows.iter().map(|r| r.y).min(),
+        rows.iter().map(|r| r.y).max(),
+    ) else {
+        return;
+    };
+    let rect = Rect {
+        x,
+        y: first,
+        width,
+        height: last - first + 1,
+    };
+    let (Some((pw, _)), Some((_, ch))) = (gfx::plot_px(rect), gfx::cell_px()) else {
+        return;
+    };
+    let ch = ch as i64;
+    let mut cv = Canvas::new(pw, rect.height as usize * ch as usize, palette.bg);
+    let tint = cv.ink(Color::Yellow);
+    let pad = (ch / 10).max(1);
+    for r in rows {
+        let top = (r.y - first) as i64 * ch;
+        if r.flash {
+            cv.fill(0, top, pw as i64, top + ch, tint);
+        } else if r.wall {
+            let dark = cv.ink(if r.color == BULL {
+                Color::Green
+            } else {
+                Color::Red
+            });
+            cv.fill(0, top, pw as i64, top + ch, dark);
+        }
+        let ink = cv.ink(r.color);
+        let w = (r.frac * pw as f64).round() as i64;
+        cv.fill(0, top + pad, w, top + ch - pad, ink);
+    }
+    gfx::submit(frame.buffer_mut(), rect, cv);
 }
 
 fn render_book_row(
@@ -412,14 +764,26 @@ fn render_book_row(
     depth_w: usize,
     max_size: f64,
     flash: bool,
+    wall: Option<WallMark>,
     palette: &Palette,
+    pixels: bool,
 ) {
     let buf = frame.buffer_mut();
-    // Background tint when this row contains the most recent trade.
+    // Background tint when this row contains the most recent trade; a wall
+    // is solid in its side's colour (it should catch the eye).
     let row_bg = if flash {
         ratatui::style::Color::Yellow
+    } else if wall.is_some() {
+        color
     } else {
         palette.bg
+    };
+    let ink = |normal: Color| {
+        if wall.is_some() && !flash {
+            Color::Black
+        } else {
+            normal
+        }
     };
     for x in 0..area.width {
         if let Some(c) = buf.cell_mut((area.x + x, area.y)) {
@@ -439,7 +803,7 @@ fn render_book_row(
             c.set_char(ch);
             c.set_style(
                 Style::default()
-                    .fg(if flash { palette.bg } else { color })
+                    .fg(if flash { palette.bg } else { ink(color) })
                     .bg(row_bg)
                     .add_modifier(Modifier::BOLD),
             );
@@ -456,7 +820,12 @@ fn render_book_row(
         }
         if let Some(c) = buf.cell_mut((x, area.y)) {
             c.set_char(ch);
-            c.set_style(Style::default().fg(palette.text).bg(row_bg));
+            let st = Style::default().fg(ink(palette.text)).bg(row_bg);
+            c.set_style(if wall.is_some() {
+                st.add_modifier(Modifier::BOLD)
+            } else {
+                st
+            });
         }
     }
 
@@ -470,11 +839,14 @@ fn render_book_row(
         }
         if let Some(c) = buf.cell_mut((x, area.y)) {
             c.set_char(ch);
-            c.set_style(Style::default().fg(palette.muted).bg(row_bg));
+            c.set_style(Style::default().fg(ink(palette.muted)).bg(row_bg));
         }
     }
 
-    // DEPTH bar at offset 36..end.
+    // DEPTH bar at offset 36..end (drawn as an image when `pixels`).
+    if pixels {
+        return;
+    }
     let bar_x = area.x + 36;
     let frac = (size / max_size).clamp(0.0, 1.0);
     let bar_eighths = (frac * (depth_w as f64) * 8.0).round() as usize;
@@ -514,7 +886,12 @@ fn render_trades(frame: &mut Frame, area: Rect, trades: &VecDeque<AggTrade>, pal
     if area.width < 16 {
         return;
     }
-    let header = format!("  {:<8}  {:>10}  {:>9}  S", "TIME", "PRICE", "SIZE");
+    let header = format!(
+        "  {:<8}  {:>10}  {:>9}  S",
+        pick("TIME", "ЧАС"),
+        pick("PRICE", "ЦІНА"),
+        pick("SIZE", "ОБСЯГ")
+    );
     render_clipped(
         frame,
         Paragraph::new(header).style(
@@ -534,7 +911,7 @@ fn render_trades(frame: &mut Frame, area: Rect, trades: &VecDeque<AggTrade>, pal
     if trades.is_empty() {
         render_clipped(
             frame,
-            Paragraph::new("  (waiting for trade stream…)")
+            Paragraph::new(pick("  (waiting for trades…)", "  (чекаю угоди…)"))
                 .style(Style::default().fg(palette.muted).bg(palette.bg)),
             Rect {
                 x: area.x,
@@ -582,5 +959,189 @@ fn render_trades(frame: &mut Frame, area: Rect, trades: &VecDeque<AggTrade>, pal
                 height: 1,
             },
         );
+    }
+}
+
+/// The tape page: time & sales of one symbol on the whole window, newest
+/// first, with the last minute's buy / sell balance on top and each trade's
+/// size as a bar (pixels when the terminal shows images).
+pub fn render_tape(
+    frame: &mut Frame,
+    area: Rect,
+    ticker: &str,
+    trades: &VecDeque<AggTrade>,
+    palette: &Palette,
+) {
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Plain)
+        .border_style(Style::default().fg(palette.text).bg(palette.bg))
+        .title(Span::styled(
+            format!(" {} - {ticker} ", pick("Time & Sales", "Стрічка угод")),
+            Style::default()
+                .fg(palette.accent)
+                .bg(palette.bg)
+                .add_modifier(Modifier::BOLD),
+        ))
+        .style(Style::default().fg(palette.text).bg(palette.bg));
+    let inner = block.inner(area);
+    render_clipped(frame, block, area);
+    if inner.width < 30 || inner.height < 5 {
+        return;
+    }
+    let line = |y: u16| Rect {
+        x: inner.x,
+        y,
+        width: inner.width,
+        height: 1,
+    };
+    let Some(newest) = trades.back().map(|t| t.time_ms) else {
+        render_clipped(
+            frame,
+            Paragraph::new(pick("  (waiting for trades…)", "  (чекаю угоди…)"))
+                .style(Style::default().fg(palette.muted).bg(palette.bg)),
+            line(inner.y + 1),
+        );
+        return;
+    };
+
+    // The last minute: who was aggressive.
+    let (mut buy_q, mut sell_q, mut buy_usd, mut sell_usd, mut n) = (0.0, 0.0, 0.0, 0.0, 0);
+    for t in trades.iter().filter(|t| t.time_ms > newest - 60_000) {
+        n += 1;
+        if t.is_buyer_maker {
+            sell_q += t.qty;
+            sell_usd += t.qty * t.price;
+        } else {
+            buy_q += t.qty;
+            buy_usd += t.qty * t.price;
+        }
+    }
+    let delta = buy_usd - sell_usd;
+    let summary = format!(
+        " 60{}  {} {} (${:.0})   {} {} (${:.0})   delta {}${:.0}   {} {}",
+        pick("s", "с"),
+        pick("buys", "купівлі"),
+        fmt_qty_col(buy_q).trim(),
+        buy_usd,
+        pick("sells", "продажі"),
+        fmt_qty_col(sell_q).trim(),
+        sell_usd,
+        if delta >= 0.0 { "+" } else { "-" },
+        delta.abs(),
+        n,
+        pick("trades", "угод")
+    );
+    render_clipped(
+        frame,
+        Paragraph::new(truncate(&summary, inner.width as usize).to_string()).style(
+            Style::default()
+                .fg(if delta >= 0.0 { BULL } else { BEAR })
+                .bg(palette.bg)
+                .add_modifier(Modifier::BOLD),
+        ),
+        line(inner.y),
+    );
+    // Buy share of the minute as a two-colour gauge.
+    let gauge = line(inner.y + 1);
+    let total = (buy_usd + sell_usd).max(1e-9);
+    if let Some((pw, ph)) = gfx::plot_px(gauge) {
+        let mut cv = Canvas::new(pw, ph, palette.bg);
+        let (bull, bear) = (cv.ink(BULL), cv.ink(BEAR));
+        let pad = (ph as i64 / 4).max(1);
+        let split = (pw as f64 * buy_usd / total).round() as i64;
+        cv.fill(0, pad, split, ph as i64 - pad, bull);
+        cv.fill(split, pad, pw as i64, ph as i64 - pad, bear);
+        gfx::submit(frame.buffer_mut(), gauge, cv);
+    } else {
+        let split = (gauge.width as f64 * buy_usd / total).round() as u16;
+        let buf = frame.buffer_mut();
+        for dx in 0..gauge.width {
+            if let Some(c) = buf.cell_mut((gauge.x + dx, gauge.y)) {
+                c.set_char(' ');
+                c.set_style(Style::default().bg(if dx < split { BULL } else { BEAR }));
+            }
+        }
+    }
+
+    // Columns: time, price, size, USD, side, then the size bar.
+    const TEXT_W: u16 = 50;
+    let header = format!(
+        "  {:<8}  {:>10}  {:>9}  {:>10}  S",
+        pick("TIME", "ЧАС"),
+        pick("PRICE", "ЦІНА"),
+        pick("SIZE", "ОБСЯГ"),
+        "USD"
+    );
+    render_clipped(
+        frame,
+        Paragraph::new(truncate(&header, inner.width as usize).to_string()).style(
+            Style::default()
+                .fg(palette.accent)
+                .bg(palette.bg)
+                .add_modifier(Modifier::BOLD),
+        ),
+        line(inner.y + 2),
+    );
+    let top = inner.y + 3;
+    let rows_n = (inner.y + inner.height).saturating_sub(top) as usize;
+    let shown: Vec<&AggTrade> = trades.iter().rev().take(rows_n).collect();
+    let max_usd = shown
+        .iter()
+        .map(|t| t.qty * t.price)
+        .fold(0.0_f64, f64::max)
+        .max(1e-9);
+    let bar_x = inner.x + TEXT_W.min(inner.width);
+    let bar_w = (inner.x + inner.width).saturating_sub(bar_x + 1);
+    let pixels = gfx::cell_px().is_some() && bar_w > 2;
+    let mut bars: Vec<DepthRow> = Vec::new();
+    for (i, t) in shown.iter().enumerate() {
+        let y = top + i as u16;
+        let usd = t.qty * t.price;
+        let color = if t.is_buyer_maker { BEAR } else { BULL };
+        let big = usd / max_usd > 0.7;
+        let text = format!(
+            "  {:<8}  {}  {}  {:>10.0}  {}",
+            fmt_clock_ms(t.time_ms),
+            fmt_price_col(t.price),
+            fmt_qty_col(t.qty),
+            usd,
+            if t.is_buyer_maker { 'S' } else { 'B' }
+        );
+        let mut style = Style::default().fg(color).bg(palette.bg);
+        if big {
+            style = style.add_modifier(Modifier::BOLD);
+        }
+        render_clipped(
+            frame,
+            Paragraph::new(truncate(&text, TEXT_W.min(inner.width) as usize).to_string())
+                .style(style),
+            Rect {
+                width: TEXT_W.min(inner.width),
+                ..line(y)
+            },
+        );
+        let frac = (usd / max_usd).clamp(0.0, 1.0);
+        if pixels {
+            bars.push(DepthRow {
+                y,
+                frac,
+                color,
+                flash: false,
+                wall: false,
+            });
+        } else if bar_w > 0 {
+            let n = (frac * bar_w as f64).round() as u16;
+            let buf = frame.buffer_mut();
+            for dx in 0..n {
+                if let Some(c) = buf.cell_mut((bar_x + dx, y)) {
+                    c.set_char(' ');
+                    c.set_style(Style::default().bg(color));
+                }
+            }
+        }
+    }
+    if pixels {
+        bar_image(frame, bar_x, bar_w, &bars, palette);
     }
 }

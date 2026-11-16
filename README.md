@@ -3,7 +3,7 @@
 ![DOS: a trading terminal that runs anywhere](docs/img/social-preview.png)
 
 **A trading terminal that runs anywhere a terminal does.**
-One tiny static binary (about 2.8 MB). No browser, no runtime, no setup
+One small static binary (about 5 MB). No browser, no runtime, no setup
 ceremony: your laptop, a server over SSH, a container, a small board.
 
 ## Mission
@@ -23,7 +23,26 @@ the terminal.
 - **Charts and depth.** Candles, line, bars and footprint; a live order book; a
   screener over Binance 24h pairs.
 - **Paper trading engine.** Local simulated broker with a persistent ledger,
-  strategies (manual, DCA timer, limit entry, hedge grid) and risk limits.
+  maker / taker fees, strategies (manual, DCA timer, limit entry, hedge grid)
+  and risk limits.
+- **Ideas and baskets.** Compare page: what the whole market does right now
+  from the ticker stream (biggest moves, coins moving as one, laggards,
+  groups), a scanner for pairs and stretched coins, a judge that checks an
+  idea on history; any row becomes a basket - several legs entered and left
+  as one with resting limit orders, on paper - and a rule can open such
+  baskets by itself (pairs far apart, laggards, faded movers, this hour's
+  stretched pairs, a group against BTC, one synthetic of up to twenty coins
+  against another - forty legs in one basket). Binance options (public `/eapi`)
+  feed put-call parity and box-spread edges, net of fees and carry, which
+  become three- or four-leg baskets held to expiry (paper only).
+- **Liquidations.** A live feed of forced liquidations across the futures
+  market, totals per 5 min / 1 h / 24 h, the most liquidated coins, circles on
+  the chart and estimated liquidation levels (a model, labelled so).
+- **Agent connector (MCP).** `dos-commander --agent` opens a local socket;
+  `dos-commander mcp --role <role>` exposes it as an MCP server. Five roles
+  (analyst, researcher, strategy tester, risk, scalper), permissions checked
+  by the server on every call, every call logged (F8). Agents never reach live
+  trading; the scalper trades paper only, inside a mandate a human issued.
 - **Demo mode.** `dos-commander --demo` runs fully offline on synthetic data, no
   keys needed.
 - **Live trading: experimental.** Binance Spot only, not yet verified on an
@@ -33,10 +52,6 @@ the terminal.
 
 None of this exists yet; it is where DOS is going.
 
-- **Agent-ready by design.** A scriptable control surface so an agent can drive
-  the terminal, read its state and place paper orders.
-- **MCP server.** Markets, order book, paper ledger and strategies exposed as
-  MCP tools for any MCP-capable agent.
 - **Algorithm lab.** Write an algorithm, test it on history and on live paper
   trading, iterate quickly; built for agents that write and test code.
 - **Connectors.** More exchanges and data sources behind one interface (Binance
@@ -48,12 +63,13 @@ None of this exists yet; it is where DOS is going.
 
 ## Screenshots
 
-![Markets: candles](docs/img/markets.png)
+![Chart: candles, liquidation levels, trading strip](docs/img/markets.png)
 
 | | |
 |---|---|
-| ![Screener and trade ticket](docs/img/screener-trading.png) | ![Footprint](docs/img/footprint.png) |
-| ![Order book](docs/img/order-book.png) | ![Settings](docs/img/settings.png) |
+| ![Compare: what the market does now](docs/img/compare.png) | ![Trade: ticket, chart, order book](docs/img/trading.png) |
+| ![Liquidations across the market](docs/img/liquidations.png) | ![Footprint](docs/img/footprint.png) |
+| ![Agents: roles and calls](docs/img/agents.png) | ![Screener](docs/img/screener.png) |
 
 *All screenshots are taken from `--demo` (synthetic data).*
 
@@ -121,14 +137,17 @@ saved and no API key is read, so it is also what the screenshots are taken from.
 | Key | Action |
 |---|---|
 | **F1** | On-screen help (every key, per view) |
-| **F3** | Markets — candles / line / bars / footprint, 1–3 panes, live ticks |
-| **F4** | Screener — Binance 24h pairs (Spot / Futures), selection + strategy panel + trade ticket |
-| **F5** | Dashboard — equity curve, positions, open orders, fills (paper ledger) |
-| **F6** | Order Book — live depth over WebSocket, recent trades |
+| **F2** | Lab — backtest a strategy (SMA Cross, RSI Reversion, Breakout, DCA, grid...): setup, equity curve vs buy&hold, walk-forward |
+| **F3** | Chart — candles / line / bars / footprint, 1–3 panes, live ticks |
+| **F4** | Screener — Binance 24h pairs (Spot / Futures): sort, filter, select for trading, add to a list |
+| **F5** | Lists — watchlist groups: manual, or dynamic (e.g. moved >5% in 15 min), tagged long / short, with a synthetic chart of the whole list (equal-weight index or sum of prices) or a stat-arb spread of two symbols (% deviation, σ, z-score) |
+| **F6** | Trade — order ticket, strategy slots and the order book of the active symbol |
+| **F7** | Stats — equity curve, positions, open orders, fills (paper ledger) |
+| **F8** | Agents — AI-agent connector: roles, calls, audit log, scalper mandates (`--agent`; `i` issue, `x` revoke) |
 | **F9** | Settings — market universe, default timeframe, API keys, cache |
 | **F10** / **q** | Quit |
 | **:** | Command palette |
-| **Markets:** `← →` symbol, `+ -` zoom, `0` reset, `, .` / `PgUp PgDn` scroll, `c` chart type, `f` timeframe, `r` refresh, `t` ticker, `[ ]` remove / add pane, `L` link panes |
+| **Markets:** `← →` symbol, `+ -` zoom, `0` reset, `, .` / `PgUp PgDn` scroll, `c` chart type, `f` timeframe (15s 1m 5m 15m 30m 1h 4h 1d 1w 1mo), `r` refresh, `t` ticker, `[ ]` remove / add pane, `L` link panes; the toolbar above the chart does the same with the mouse, plus chart shift and a PNG snapshot. `t` also takes a formula: `=BTC/ETH`, `=Z(BTC/ETH,50)`, `=F:BTCUSDT-BTCUSDT`, `=BTC/Y:SPY`, futures data `=FR:BTC` (funding) `=OI:BTC` `=LS:BTC` `=TK:BTC`, weather `=W:KYIV.TEMP`, any JSON API `=H:FNG` (sources.json), FRED macro `=M:DGS10` (see `docs/SYNTHETIC-LAB.md`); `:compare BTC ETH` shows who leads whom, a correlation heat map of a list, and a judge that checks whether a condition really changes the odds (time split, chaos baseline, number of tries) |
 | **Mouse** | Click F-keys, menu titles, rows, buttons, scrollbar; wheel scrolls |
 
 ## Exchange API keys
@@ -197,7 +216,7 @@ rust/     the application (Ratatui + crossterm; SQLite and TLS are bundled)
 shared/   design tokens (TOML) and their code generator
 ```
 
-A single binary, `cargo build --release`, about 2.8 MB. Data comes from a thin
+A single binary, `cargo build --release`, about 5 MB. Data comes from a thin
 network layer (REST + WebSocket) that demo mode swaps for a synthetic one, so
 everything above it is identical in both.
 
@@ -214,7 +233,7 @@ Documentation:
 |---|---|
 | First screen | ~10 ms. The 10 symbols of the active market load in the background (status line: `Fetching n/10`); the first chart comes from the OHLC cache or its own fetch. |
 | RAM | ~10 MB |
-| Binary | ~2.9 MB stripped, single static executable |
+| Binary | ~4.8 MB stripped, single static executable |
 | Redraw | immediately after input, otherwise at most every 50 ms (idle ≈ 2 % of one core on a chart view); each pane's series is cached until its data, filters, zoom or scroll change |
 
 ## Roadmap

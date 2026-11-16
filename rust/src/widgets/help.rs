@@ -47,7 +47,7 @@ pub fn render(
         .title(Span::styled(
             format!(
                 " {} ({}/{}) ",
-                "Keyboard Shortcuts",
+                crate::i18n::pick("Keyboard Shortcuts", "Клавіші"),
                 page.page + 1,
                 page.page_count
             ),
@@ -98,8 +98,8 @@ pub fn render(
     };
 
     // Prev button
-    let prev_label = "< Prev";
-    let prev_w = prev_label.len() as u16;
+    let prev_label = crate::i18n::pick("< Prev", "< Назад");
+    let prev_w = prev_label.chars().count() as u16;
     let prev_x = area.x + 2;
     let prev_rect = Rect {
         x: prev_x,
@@ -116,8 +116,8 @@ pub fn render(
     );
 
     // Next button
-    let next_label = "Next >";
-    let next_w = next_label.len() as u16;
+    let next_label = crate::i18n::pick("Next >", "Далі >");
+    let next_w = next_label.chars().count() as u16;
     let next_x = area.x + area.width.saturating_sub(next_w + 2);
     let next_rect = Rect {
         x: next_x,

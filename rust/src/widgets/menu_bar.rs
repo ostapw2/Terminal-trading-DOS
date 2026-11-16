@@ -14,6 +14,45 @@ pub struct MenuEntry {
     pub hotkey: char,
 }
 
+/// A menu title in the chosen language (the English title is the menu's id in
+/// the code; the hotkey stays a Latin letter).
+pub fn title_label(en: &'static str) -> &'static str {
+    use crate::i18n::pick;
+    let uk = match en {
+        "Symbol" => "Символ",
+        "Chart" => "Графік",
+        "Timeframe" => "Таймфрейм",
+        "History" => "Історія",
+        "Panes" => "Панелі",
+        "Sort" => "Сортування",
+        "Filter" => "Фільтр",
+        "Open" => "Відкрити",
+        "Refresh" => "Оновити",
+        "List" => "Список",
+        "Market" => "Ринок",
+        "API" => "API",
+        "Cache" => "Кеш",
+        "Target" => "Ціль",
+        "Zoom" => "Масштаб",
+        "Reconnect" => "Перепідключити",
+        "Windows" => "Вікна",
+        "Workspace" => "Стіл",
+        other => other,
+    };
+    pick(en, uk)
+}
+
+/// Cells a menu title takes in the bar (as drawn by [`render_with_hover`]).
+pub fn title_width(e: &MenuEntry) -> u16 {
+    let shown = title_label(e.title);
+    let n = shown.chars().count() as u16;
+    if shown == e.title {
+        n
+    } else {
+        n + 2
+    }
+}
+
 pub fn render_with_hover(
     frame: &mut Frame,
     area: Rect,
@@ -46,7 +85,16 @@ pub fn render_with_hover(
 
     let mut x = area.x.saturating_add(2);
     for e in entries {
-        let title_w = e.title.chars().count() as u16;
+        let shown = title_label(e.title);
+        // A translated title has no Latin hotkey letter inside: it goes in front.
+        let owned;
+        let (title, hotkey_front) = if shown == e.title {
+            (shown, false)
+        } else {
+            owned = format!("{} {}", e.hotkey, shown);
+            (owned.as_str(), true)
+        };
+        let title_w = title.chars().count() as u16;
         let cell = Rect {
             x,
             y: area.y,
@@ -71,13 +119,17 @@ pub fn render_with_hover(
         };
 
         let hotkey_lower = e.hotkey.to_ascii_lowercase();
-        let title_lower = e.title.to_lowercase();
-        let hotkey_pos = title_lower.find(hotkey_lower);
+        let title_lower = title.to_lowercase();
+        let hotkey_pos = if hotkey_front {
+            Some(0)
+        } else {
+            title_lower.find(hotkey_lower)
+        };
 
         if let Some(pos) = hotkey_pos {
-            let before = &e.title[..pos];
-            let hotkey_char = e.title[pos..].chars().next().unwrap_or(e.hotkey);
-            let after = &e.title[pos + hotkey_char.len_utf8()..];
+            let before = &title[..pos];
+            let hotkey_char = title[pos..].chars().next().unwrap_or(e.hotkey);
+            let after = &title[pos + hotkey_char.len_utf8()..];
 
             let mut spans = Vec::new();
             if !before.is_empty() {
@@ -100,7 +152,7 @@ pub fn render_with_hover(
             let p = Paragraph::new(Line::from(spans)).style(base_style);
             render_clipped(frame, p, cell);
         } else {
-            let p = Paragraph::new(Span::styled(e.title, base_style)).style(base_style);
+            let p = Paragraph::new(Span::styled(title, base_style)).style(base_style);
             render_clipped(frame, p, cell);
         }
 

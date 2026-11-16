@@ -21,7 +21,7 @@
 //! +------------------------------------------------------------------+
 //! ```
 //!
-//! Tab cycles focus: Market(5) → Timeframe(5) → ObShowTrades → SpotKey →
+//! Tab cycles focus: Market(5) → Timeframe(10) → ObShowTrades → SpotKey →
 //! SpotSecret → FutKey → FutSecret → FontSize → Buttons.
 
 use crate::widgets::fmt::{rect_contains, render_clipped};
@@ -65,8 +65,13 @@ pub const TIMEFRAMES: &[(&str, Timeframe)] = &[
     ("15 sec    (intraday)", Timeframe::S15),
     ("1 min     (intraday)", Timeframe::M1),
     ("5 min     (intraday)", Timeframe::M5),
+    ("15 min    (intraday)", Timeframe::M15),
+    ("30 min    (intraday)", Timeframe::M30),
     ("1 hour    (intraday)", Timeframe::H1),
+    ("4 hours   (intraday)", Timeframe::H4),
     ("1 day     (default)", Timeframe::D1),
+    ("1 week", Timeframe::W1),
+    ("1 month", Timeframe::MN),
 ];
 
 pub const BUTTONS: &[&str] = &["Apply", "ClearCache", "Cancel"];
@@ -78,9 +83,10 @@ pub const FONT_SIZE_MAX: i32 = 48;
 /// Focusable controls after the market and timeframe radio rows, in Tab
 /// order.  The ONLY place that defines focus positions: `focus_index` and
 /// `zone_of` are derived from it, nothing else counts constants (audit W7).
-const FIXED_ZONES: [Zone; 9] = [
+const FIXED_ZONES: [Zone; 10] = [
     Zone::ObShowTrades,
     Zone::ChartTodayOnly,
+    Zone::Language,
     Zone::SpotKey,
     Zone::SpotSecret,
     Zone::FutKey,
@@ -163,7 +169,11 @@ impl SettingsState {
         live_enabled: bool,
     ) -> Self {
         let m_idx = MARKETS.iter().position(|(_, m)| *m == market).unwrap_or(0);
-        let t_idx = TIMEFRAMES.iter().position(|(_, t)| *t == tf).unwrap_or(4);
+        let t_idx = TIMEFRAMES
+            .iter()
+            .position(|(_, t)| *t == tf)
+            .or_else(|| TIMEFRAMES.iter().position(|(_, t)| *t == Timeframe::D1))
+            .unwrap_or(0);
         let mut k = InputState::new("(none)");
         let mut s = InputState::new("(none)");
         let mut fk = InputState::new("(none)");
@@ -205,6 +215,7 @@ pub struct SettingsLayout {
     pub timeframe_rows: Vec<Rect>,
     pub ob_trades_rect: Rect,
     pub chart_today_rect: Rect,
+    pub language_rect: Rect,
     pub font_dec_rect: Rect,
     pub font_inc_rect: Rect,
     pub key_rect: Rect,
@@ -278,7 +289,7 @@ pub fn render(
         font_dec_rect,
         font_inc_rect,
     ) = render_left(frame, left_col, st, mouse, palette);
-    let (key_rect, secret_rect, fut_key_rect, fut_secret_rect, live_toggle_rect) =
+    let (key_rect, secret_rect, fut_key_rect, fut_secret_rect, live_toggle_rect, language_rect) =
         render_right(frame, right_col, st, palette);
     let (apply_rect, clear_rect, cancel_rect) =
         render_footer(frame, footer, st, mouse, pressed_button, palette);
@@ -289,6 +300,7 @@ pub fn render(
         timeframe_rows,
         ob_trades_rect,
         chart_today_rect,
+        language_rect,
         font_dec_rect,
         font_inc_rect,
         key_rect,
@@ -640,9 +652,10 @@ fn render_right(
     area: Rect,
     st: &SettingsState,
     palette: &Palette,
-) -> (Rect, Rect, Rect, Rect, Rect) {
+) -> (Rect, Rect, Rect, Rect, Rect, Rect) {
     if area.width < 16 {
         return (
+            Rect::default(),
             Rect::default(),
             Rect::default(),
             Rect::default(),
@@ -659,6 +672,46 @@ fn render_right(
     .intersection(frame.area());
     let label_w: u16 = 9;
     let mut y = pad.y;
+
+    // ── Language ──
+    let mut language_rect = Rect::default();
+    if y + 2 <= pad.y + pad.height {
+        render_section_header(
+            frame,
+            Rect {
+                x: pad.x,
+                y,
+                width: pad.width,
+                height: 1,
+            },
+            "--Мова / Language  (Space)",
+            palette,
+        );
+        y += 1;
+        language_rect = Rect {
+            x: pad.x + 1,
+            y,
+            width: pad.width.saturating_sub(2),
+            height: 1,
+        }
+        .intersection(pad);
+        let uk = crate::i18n::get() == crate::i18n::Lang::Uk;
+        let label = format!(
+            "{} Українська   {} English",
+            if uk { "[ x ]" } else { "[   ]" },
+            if uk { "[   ]" } else { "[ x ]" },
+        );
+        let style = if st.focused == focus_index(Zone::Language) {
+            Style::default()
+                .fg(palette.accent)
+                .bg(palette.bg)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(palette.text).bg(palette.bg)
+        };
+        render_clipped(frame, Paragraph::new(label).style(style), language_rect);
+        y += 2;
+    }
 
     // ── Binance Spot ──
     render_section_header(
@@ -917,6 +970,7 @@ fn render_right(
         fut_key_rect,
         fut_secret_rect,
         live_toggle_rect,
+        language_rect,
     )
 }
 
@@ -983,6 +1037,7 @@ enum Zone {
     Timeframe(usize),
     ObShowTrades,
     ChartTodayOnly,
+    Language,
     SpotKey,
     SpotSecret,
     FutKey,
@@ -1036,6 +1091,7 @@ pub fn handle_key(state: &mut SettingsState, code: KeyCode) -> SettingsAction {
             Zone::FutSecret => state.futures_api_secret.push_char(c),
             Zone::ObShowTrades if c == ' ' => return activate(state),
             Zone::ChartTodayOnly if c == ' ' => return activate(state),
+            Zone::Language if c == ' ' => return activate(state),
             Zone::FontSize => {
                 if c == '+' || c == '=' {
                     state.font_size = (state.font_size + 1).min(FONT_SIZE_MAX);
@@ -1069,6 +1125,16 @@ pub fn handle_key(state: &mut SettingsState, code: KeyCode) -> SettingsAction {
     SettingsAction::None
 }
 
+/// The other interface language, at once (saved on Apply).
+fn toggle_language() {
+    use crate::i18n::{get, set, Lang};
+    set(if get() == Lang::Uk {
+        Lang::En
+    } else {
+        Lang::Uk
+    });
+}
+
 fn activate(state: &mut SettingsState) -> SettingsAction {
     match zone_of(state.focused) {
         Zone::Market(i) => {
@@ -1089,6 +1155,10 @@ fn activate(state: &mut SettingsState) -> SettingsAction {
                 HistoryRange::Today => HistoryRange::Last3_5Days,
                 HistoryRange::Last3_5Days => HistoryRange::All,
             };
+            SettingsAction::None
+        }
+        Zone::Language => {
+            toggle_language();
             SettingsAction::None
         }
         Zone::SpotKey | Zone::SpotSecret | Zone::FutKey | Zone::FutSecret => SettingsAction::None,
@@ -1138,6 +1208,11 @@ pub fn handle_click(
             HistoryRange::Last3_5Days => HistoryRange::All,
         };
         state.focused = focus_index(Zone::ChartTodayOnly);
+        return SettingsAction::None;
+    }
+    if rect_contains(layout.language_rect, x, y) {
+        toggle_language();
+        state.focused = focus_index(Zone::Language);
         return SettingsAction::None;
     }
     if rect_contains(layout.key_rect, x, y) {

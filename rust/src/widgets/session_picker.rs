@@ -116,7 +116,7 @@ pub fn render(
         .border_type(BorderType::Double)
         .border_style(Style::default().fg(palette.accent).bg(palette.bg))
         .title(Span::styled(
-            " Session window ",
+            crate::i18n::pick(" Session window ", " Торгова сесія "),
             Style::default()
                 .fg(palette.accent)
                 .bg(palette.bg)
@@ -146,7 +146,7 @@ pub fn render(
     };
     render_clipped(
         frame,
-        Paragraph::new("Start:").style(label_style),
+        Paragraph::new(crate::i18n::pick("Start:", "Початок:")).style(label_style),
         start_label_rect,
     );
     let start_minus = Rect {
@@ -190,7 +190,7 @@ pub fn render(
     };
     render_clipped(
         frame,
-        Paragraph::new("End:").style(label_style),
+        Paragraph::new(crate::i18n::pick("End:", "Кінець:")).style(label_style),
         end_label_rect,
     );
     let end_minus = Rect {
@@ -269,8 +269,11 @@ pub fn render(
     if hint_y + button::HEIGHT < inner.y + inner.height {
         render_clipped(
             frame,
-            Paragraph::new(" Tab focus  Up/Dn nudge  Enter apply ")
-                .style(Style::default().fg(palette.muted).bg(palette.bg)),
+            Paragraph::new(crate::i18n::pick(
+                " Tab focus  Up/Dn nudge  Enter apply ",
+                " Tab фокус  ↑/↓ крок  Enter застосувати ",
+            ))
+            .style(Style::default().fg(palette.muted).bg(palette.bg)),
             Rect {
                 x: inner.x,
                 y: hint_y,
@@ -282,9 +285,14 @@ pub fn render(
 
     // Action button row — 3D raised, 2 rows tall.
     let action_y = inner.y + inner.height.saturating_sub(button::HEIGHT);
-    let off_w = button::measure("Off");
-    let cancel_w = button::measure("Cancel");
-    let apply_w = button::measure("Apply");
+    let (off_l, cancel_l, apply_l) = (
+        crate::i18n::pick("Off", "Вимк."),
+        crate::i18n::pick("Cancel", "Скасувати"),
+        crate::i18n::pick("Apply", "Застосувати"),
+    );
+    let off_w = button::measure(off_l);
+    let cancel_w = button::measure(cancel_l);
+    let apply_w = button::measure(apply_l);
     let off_rect = Rect {
         x: inner.x + 1,
         y: action_y,
@@ -316,9 +324,9 @@ pub fn render(
             let s = button::pick_state(false, pressed, false, hover, primary);
             button::render(frame, r, label, s, palette);
         };
-    render_btn(frame, off_rect, "Off", false, SessionButton::Off);
-    render_btn(frame, cancel_rect, "Cancel", false, SessionButton::Cancel);
-    render_btn(frame, apply_rect, "Apply", true, SessionButton::Apply);
+    render_btn(frame, off_rect, off_l, false, SessionButton::Off);
+    render_btn(frame, cancel_rect, cancel_l, false, SessionButton::Cancel);
+    render_btn(frame, apply_rect, apply_l, true, SessionButton::Apply);
 
     SessionPickerLayout {
         area,

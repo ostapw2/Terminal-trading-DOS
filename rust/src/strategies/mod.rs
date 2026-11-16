@@ -33,10 +33,14 @@ pub mod params;
 pub mod registry;
 
 // Built-in strategies.  Add your new module to this list.
+pub mod breakout;
 pub mod dca_timer;
 pub mod hedge_grid;
+pub mod indicators;
 pub mod limit_entry;
 pub mod manual_market;
+pub mod rsi_reversion;
+pub mod sma_cross;
 
 pub use actions::Action;
 pub use context::{Bar, Ctx, Fill, Position, Side, Tick};

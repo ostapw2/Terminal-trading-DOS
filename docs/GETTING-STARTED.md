@@ -61,7 +61,7 @@ the wheel scrolls.
 
 1. **F4**, move with the arrow keys, press **Space** on two or three pairs.
 2. In the Trade Ticket (right) pick the size ($ or quantity), then click
-   **BUY MKT** or press **B** (**N** sells, **Z** closes).
+   **BUY** or press **B** (**N** sells, **Z** closes).
 3. **F5** shows the resulting positions and PnL.
 
 The paper ledger is saved between runs. To start over: menu **Cache** → reset

@@ -14,8 +14,15 @@ use crate::tokens::Palette;
 use crate::widgets::chart;
 use crate::widgets::fmt::render_clipped;
 
+#[derive(Default)]
 pub struct MarketsLayout {
     pub area: Rect,
+    /// The single-pane plot and the price range it shows (`None`: nothing
+    /// to scale), for turning a pointer row into a price.
+    pub plot: Rect,
+    pub range: Option<(f64, f64)>,
+    /// The trade overlay's clickable parts (`chart_trade`), first match wins.
+    pub trade_hits: Vec<(Rect, crate::widgets::chart_trade::Hit)>,
     pub pane_rects: Vec<Rect>,
     /// Horizontal scroll-bar area beneath volume.  Click x → jump to that
     /// candle position.  Empty rect when not rendered (multi-pane / no data).
@@ -38,6 +45,22 @@ pub struct SeriesFilters<'a> {
     pub date_to: Option<&'a str>,
     pub session: crate::markets::SessionWindow,
     pub time_from_ms: i64,
+    /// Empty columns after the newest candle ("chart shift"): room on the
+    /// right.  They are gap sentinels, so no scale or layer counts them.
+    pub right_pad: usize,
+    /// Liquidations of this symbol, oldest first, drawn over the candles
+    /// (not a filter: the series is the same with or without them).  Empty
+    /// when the layer is off or the market has none.
+    pub liqs: Option<&'a std::collections::VecDeque<crate::data::liquidations::Liquidation>>,
+    /// Estimated liquidation levels of this symbol (`crate::liqmap`).
+    pub liq_levels: Option<&'a crate::liqmap::LiqMap>,
+    /// Position, stop / take, orders and the order strip (single pane only).
+    pub trade: Option<&'a crate::widgets::chart_trade::TradeMarks>,
+    /// Labelled levels (a plan's target, stop, bands): compact panes.
+    pub refs: &'a [chart::RefLine],
+    /// The mouse, for the crosshair on a compact pane (the single pane takes
+    /// it as an argument of `render`).
+    pub hover: Option<(u16, u16)>,
 }
 
 impl SeriesFilters<'_> {
@@ -46,6 +69,12 @@ impl SeriesFilters<'_> {
         date_to: None,
         session: crate::markets::SessionWindow::ALL,
         time_from_ms: 0,
+        right_pad: 0,
+        liqs: None,
+        liq_levels: None,
+        trade: None,
+        refs: &[],
+        hover: None,
     };
 }
 
@@ -78,6 +107,7 @@ struct ViewKey {
     time_from_ms: i64,
     aggregate: u16,
     offset: usize,
+    right_pad: usize,
 }
 
 fn data_checksum(data: &[crate::markets::Ohlc]) -> u64 {
@@ -127,6 +157,7 @@ pub fn build_view(
         time_from_ms: filters.time_from_ms,
         aggregate,
         offset: chart_offset,
+        right_pad: filters.right_pad,
     };
     VIEW_CACHE.with(|c| {
         let mut cache = c.borrow_mut();
@@ -189,6 +220,17 @@ pub fn build_view_uncached(
     ohlc.truncate(trim_end);
     let mut fp = full_fp;
     fp.truncate(trim_end);
+    if filters.right_pad > 0 {
+        let gap = crate::markets::Ohlc {
+            is_gap: true,
+            ..Default::default()
+        };
+        if !fp.is_empty() {
+            let empty = crate::data::footprint::FootprintCandle::empty(0, &gap);
+            fp.extend(std::iter::repeat_n(empty, filters.right_pad));
+        }
+        ohlc.extend(std::iter::repeat_n(gap, filters.right_pad));
+    }
     ChartView {
         ohlc,
         footprint: fp,
@@ -207,19 +249,106 @@ fn render_plot(
     visible: &[crate::markets::Ohlc],
     zoom: u16,
     chart_type: chart::ChartType,
+    cross: Option<chart::Cross>,
+    liqs: Option<&std::collections::VecDeque<crate::data::liquidations::Liquidation>>,
+    levels: Option<&crate::liqmap::LiqMap>,
+    hlines: &[(f64, ratatui::style::Color)],
     palette: &Palette,
-) -> bool {
-    let Some((hi, lo)) = chart::visible_range(visible) else {
-        return false;
+) -> Option<bool> {
+    let (hi, lo) = chart::visible_range(visible)?;
+    // The footprint's cells hold numbers: no liquidations over them.
+    let liqs = liqs.filter(|_| chart_type != chart::ChartType::DeltaCluster);
+    // Outside the price range a mark would stick to the edge: left out.
+    let mut marks = liqs
+        .map(|l| crate::data::liquidations::marks(visible, l.iter()))
+        .unwrap_or_default();
+    marks.retain(|m| (lo..=hi).contains(&m.price));
+    let levels = levels.filter(|_| chart_type != chart::ChartType::DeltaCluster);
+    let over = chart::Overlays {
+        marks: &marks,
+        levels,
+        hlines,
     };
-    chart::render_grid(frame, plot, hi, lo, palette);
-    if chart_type == chart::ChartType::DeltaCluster && !view.footprint.is_empty() {
-        chart::render_footprint(frame, plot, &view.footprint, (hi, lo), palette, zoom);
-    } else {
-        chart::render_chart(frame, plot, &view.ohlc, palette, zoom, chart_type);
+    // The live price, only where the window reaches the newest candle.
+    let last = match (
+        visible.iter().rfind(|o| !o.is_gap),
+        view.ohlc.iter().rfind(|o| !o.is_gap),
+    ) {
+        (Some(shown), Some(newest)) if shown.time_ms == newest.time_ms => {
+            Some((shown.close, shown.close >= shown.open))
+        }
+        _ => None,
+    };
+    // Pixels when the terminal shows images; characters otherwise.
+    let pixels = chart::render_plot_pixels(
+        frame,
+        plot,
+        &view.ohlc,
+        (hi, lo),
+        zoom,
+        chart_type,
+        last,
+        &over,
+        cross,
+        palette,
+    );
+    if !pixels {
+        chart::render_grid(frame, plot, hi, lo, palette);
+        if let Some(map) = levels {
+            chart::render_level_cells(frame, plot, map, (hi, lo));
+        }
+        if chart_type == chart::ChartType::DeltaCluster && !view.footprint.is_empty() {
+            chart::render_footprint(frame, plot, &view.footprint, (hi, lo), palette, zoom);
+        } else {
+            chart::render_chart(frame, plot, &view.ohlc, palette, zoom, chart_type);
+            chart::render_liq_cells(frame, plot, &marks, (hi, lo), zoom, palette);
+        }
+        if let Some(c) = cross {
+            chart::render_cross_cells(frame, plot, c, zoom, palette);
+        }
     }
     chart::render_yaxis(frame, axis, hi, lo, palette);
-    true
+    if let Some((price, up)) = last {
+        chart::render_last_price(frame, plot, axis, price, up, hi, lo, palette, !pixels);
+    }
+    Some(pixels)
+}
+
+/// The liquidation lines in the plot's corner: the last hour's liquidations
+/// and the estimated levels in view.  Drawn after everything else on the
+/// plot (session dividers too), so nothing crosses the text.
+fn render_liq_legend(
+    frame: &mut Frame,
+    plot: Rect,
+    visible: &[crate::markets::Ohlc],
+    chart_type: chart::ChartType,
+    filters: &SeriesFilters,
+    palette: &Palette,
+) {
+    if chart_type == chart::ChartType::DeltaCluster {
+        return;
+    }
+    let Some((hi, lo)) = chart::visible_range(visible) else {
+        return;
+    };
+    let hour = filters.liqs.map(|l| {
+        let hour_ago = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_millis() as i64)
+            - 3_600_000;
+        let start = l.partition_point(|x| x.time_ms < hour_ago);
+        let t = crate::data::liquidations::totals(l.range(start..), hour_ago);
+        (t.long_usd, t.short_usd)
+    });
+    let est = filters.liq_levels.map(|m| {
+        m.levels
+            .iter()
+            .filter(|l| (lo..=hi).contains(&l.price))
+            .fold((0.0, 0.0), |(a, b), l| (a + l.long_usd, b + l.short_usd))
+    });
+    if hour.is_some() || est.is_some() {
+        chart::render_liq_legend(frame, plot, hour, est, palette);
+    }
 }
 
 /// Compact pane — chart + thin header + volume.  Used when several panes
@@ -256,21 +385,38 @@ pub fn render_pane(
                 0.0
             };
             let arrow = if chg_pct >= 0.0 { "+" } else { "-" };
-            format!(
-                " {}  ${:.2}  {}{:.2}%  | {} | {} ",
-                ticker,
-                last.close,
-                arrow,
-                chg_pct.abs(),
-                timeframe.name(),
-                chart_type.name(),
-            )
+            // A coin is priced in dollars; a formula's value is a number
+            // (a % change of a z-score or of a negative spread means nothing).
+            let coin = ticker
+                .chars()
+                .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit());
+            if coin {
+                format!(
+                    " {}  ${}  {}{:.2}%  | {} | {} ",
+                    ticker,
+                    crate::widgets::fmt::fmt_value(last.close),
+                    arrow,
+                    chg_pct.abs(),
+                    timeframe.name(),
+                    chart_type.name(),
+                )
+            } else {
+                format!(
+                    " {}  {} {}  | {} | {} ",
+                    ticker,
+                    crate::i18n::pick("now", "зараз"),
+                    crate::widgets::fmt::fmt_value(last.close),
+                    timeframe.name(),
+                    chart_type.name(),
+                )
+            }
         }
         _ => format!(
-            " {} | {} | {} | (loading) ",
+            " {} | {} | {} | {} ",
             ticker,
             timeframe.name(),
-            chart_type.name()
+            chart_type.name(),
+            crate::i18n::pick("(loading)", "(завантаження)")
         ),
     };
     let block = Block::default()
@@ -306,7 +452,9 @@ pub fn render_pane(
         .constraints([Constraint::Min(10), Constraint::Length(9)])
         .split(rows[0]);
     let visible = chart::visible_slice_at(&view.ohlc, chart_split[0].width, zoom, 0);
-    render_plot(
+    let ref_inks: Vec<(f64, ratatui::style::Color)> =
+        filters.refs.iter().map(|l| (l.value, l.color)).collect();
+    let pixels = render_plot(
         frame,
         chart_split[0],
         chart_split[1],
@@ -314,8 +462,26 @@ pub fn render_pane(
         visible,
         zoom,
         chart_type,
+        filters
+            .hover
+            .and_then(|m| chart::Cross::at(chart_split[0], m)),
+        filters.liqs,
+        filters.liq_levels,
+        &ref_inks,
         palette,
     );
+    if let (Some(range), Some(px)) = (chart::visible_range(visible), pixels) {
+        chart::render_ref_lines(
+            frame,
+            chart_split[0],
+            chart_split[1],
+            range,
+            filters.refs,
+            px,
+            palette,
+        );
+    }
+    render_liq_legend(frame, chart_split[0], visible, chart_type, filters, palette);
 
     // X-axis dates.
     let xaxis_split = Layout::default()
@@ -335,6 +501,9 @@ pub fn render_pane(
     view.full_len
 }
 
+/// A chart is "LIVE" while its last tick is at most this old.
+pub const LIVE_MAX_AGE_SECS: f64 = 5.0;
+
 pub fn render(
     frame: &mut Frame,
     area: Rect,
@@ -349,6 +518,9 @@ pub fn render(
     chart_offset: usize,
     filters: &SeriesFilters,
     hover: Option<(u16, u16)>,
+    tick_age_secs: Option<f64>,
+    // Why there is nothing to show (the last download error), if known.
+    empty_note: Option<&str>,
     palette: &Palette,
 ) -> MarketsLayout {
     let (date_from, date_to, session) = (filters.date_from, filters.date_to, filters.session);
@@ -368,18 +540,19 @@ pub fn render(
             .style(Style::default().fg(palette.text).bg(palette.bg));
         let inner = block.inner(area);
         render_clipped(frame, block, area);
-        let placeholder = Paragraph::new("No data — press R to refresh")
+        let text = match empty_note {
+            Some(n) => format!("{n}  (R: try again)"),
+            None => "No data — press R to refresh".to_string(),
+        };
+        let placeholder = Paragraph::new(text)
+            .wrap(ratatui::widgets::Wrap { trim: true })
             .style(Style::default().fg(palette.muted).bg(palette.bg))
             .alignment(ratatui::layout::Alignment::Center);
         render_clipped(frame, placeholder, inner);
         return MarketsLayout {
             area,
             pane_rects: Vec::new(),
-            scrollbar_rect: Rect::default(),
-            scroll_total: 0,
-            from_date_rect: Rect::default(),
-            to_date_rect: Rect::default(),
-            session_rect: Rect::default(),
+            ..MarketsLayout::default()
         };
     }
 
@@ -422,11 +595,7 @@ pub fn render(
         return MarketsLayout {
             area,
             pane_rects: Vec::new(),
-            scrollbar_rect: Rect::default(),
-            scroll_total: 0,
-            from_date_rect: Rect::default(),
-            to_date_rect: Rect::default(),
-            session_rect: Rect::default(),
+            ..MarketsLayout::default()
         };
     }
 
@@ -445,6 +614,7 @@ pub fn render(
         date_from,
         date_to,
         session,
+        tick_age_secs,
         palette,
     );
 
@@ -457,7 +627,17 @@ pub fn render(
     // Compute the SAME visible slice that render_candles will use, so the
     // axis labels and grid lines reflect the actual zoomed-in price range.
     let visible = chart::visible_slice_at(working_data, chart_split[0].width, zoom, 0);
-    if !render_plot(
+    // The crosshair: the mouse over the plot.
+    let plot = chart_split[0];
+    let cross = hover.and_then(|m| chart::Cross::at(plot, m));
+    // Trade lines go into the picture; the footprint has numbers in its cells.
+    let trade = filters
+        .trade
+        .filter(|_| chart_type != chart::ChartType::DeltaCluster);
+    let hlines = trade
+        .map(|t| crate::widgets::chart_trade::hlines(t, palette))
+        .unwrap_or_default();
+    let pixels = render_plot(
         frame,
         chart_split[0],
         chart_split[1],
@@ -465,8 +645,13 @@ pub fn render(
         visible,
         zoom,
         chart_type,
+        cross,
+        filters.liqs,
+        filters.liq_levels,
+        &hlines,
         palette,
-    ) {
+    );
+    if pixels.is_none() {
         let placeholder = Paragraph::new("(loading)")
             .style(Style::default().fg(palette.muted).bg(palette.bg))
             .alignment(ratatui::layout::Alignment::Center);
@@ -508,6 +693,7 @@ pub fn render(
         zoom,
         palette,
     );
+    render_liq_legend(frame, chart_split[0], visible, chart_type, filters, palette);
 
     // Horizontal scroll-bar beneath volume — same width as the chart area
     // (excludes the y-axis column).
@@ -526,21 +712,49 @@ pub fn render(
         palette,
     );
 
-    if let Some((mx, my)) = hover {
-        render_hover_tooltip(
-            frame,
-            chart_split[0],
-            vol_split[0],
-            visible,
-            zoom,
-            mx,
-            my,
-            palette,
-        );
+    if let Some(c) = cross {
+        let candle = visible.get(c.candle(zoom)).filter(|k| !k.is_gap);
+        let time = candle.map_or(String::new(), |k| candle_time_label(k, timeframe));
+        if let Some(range) = chart::visible_range(visible) {
+            chart::render_cross_labels(
+                frame,
+                plot,
+                chart_split[1],
+                xaxis_split[0],
+                c,
+                zoom,
+                range,
+                &time,
+                palette,
+            );
+        }
+        if let Some(k) = candle {
+            render_data_window(frame, plot, k, &time, c.col < plot.width / 2, palette);
+        }
     }
+
+    // Trade lines and the order strip last: nothing (the crosshair's data
+    // window included) may hide a position or its stop.
+    let range = chart::visible_range(visible);
+    let trade_hits = match (trade, range, pixels) {
+        (Some(t), Some(r), Some(px)) => crate::widgets::chart_trade::render(
+            frame,
+            plot,
+            chart_split[1],
+            r,
+            t,
+            px,
+            hover,
+            palette,
+        ),
+        _ => Vec::new(),
+    };
 
     MarketsLayout {
         area,
+        plot,
+        range,
+        trade_hits,
         pane_rects: Vec::new(),
         scrollbar_rect,
         scroll_total,
@@ -778,65 +992,65 @@ fn render_scrollbar(
     }
 }
 
-fn render_hover_tooltip(
+/// When a candle opened, as the crosshair shows it: the date for daily and
+/// longer candles, `MM-DD HH:MM` (UTC) below a day.
+pub fn candle_time_label(c: &crate::markets::Ohlc, tf: crate::markets::Timeframe) -> String {
+    if c.time_ms <= 0 {
+        return c.date.clone();
+    }
+    let secs = c.time_ms / 1000;
+    let date = crate::markets::unix_secs_to_iso_date(secs);
+    if tf.duration_secs() >= 86_400 {
+        return date;
+    }
+    let tod = secs.rem_euclid(86_400);
+    format!(
+        "{} {:02}:{:02}",
+        date.get(5..).unwrap_or(&date),
+        tod / 3600,
+        tod % 3600 / 60
+    )
+}
+
+/// The data window: the crosshair candle's time, OHLC, change and volume,
+/// docked in a top corner of the plot away from the mouse (`right`: the
+/// mouse is on the left half).
+fn render_data_window(
     frame: &mut Frame,
-    chart_area: Rect,
-    vol_area: Rect,
-    visible: &[crate::markets::Ohlc],
-    candle_w: u16,
-    mx: u16,
-    my: u16,
+    plot: Rect,
+    c: &crate::markets::Ohlc,
+    time: &str,
+    right: bool,
     palette: &Palette,
 ) {
-    if visible.is_empty() {
-        return;
-    }
-    let cw = candle_w.max(1);
-    let in_chart = mx >= chart_area.x
-        && mx < chart_area.x + chart_area.width
-        && my >= chart_area.y
-        && my < chart_area.y + chart_area.height;
-    let in_vol = mx >= vol_area.x
-        && mx < vol_area.x + vol_area.width
-        && my >= vol_area.y
-        && my < vol_area.y + vol_area.height;
-    if !in_chart && !in_vol {
-        return;
-    }
-    let col = mx.saturating_sub(chart_area.x) / cw;
-    let idx = (col as usize).min(visible.len().saturating_sub(1));
-    let c = &visible[idx];
-    if c.is_gap {
-        // Hovering a session gap — no real OHLC to show.
-        return;
-    }
-    let up = c.close >= c.open;
-    let arrow = if up { "+" } else { "-" };
-    let dir = if up {
-        Color::LightGreen
+    use crate::widgets::fmt::fmt_value as fmt_price;
+    let chg = if c.open > 0.0 {
+        (c.close - c.open) / c.open * 100.0
     } else {
-        Color::LightRed
+        0.0
     };
     let lines = [
-        format!(" {}  {} ", c.date, arrow),
-        format!(" O {:.2}", c.open),
-        format!(" H {:.2}", c.high),
-        format!(" L {:.2}", c.low),
-        format!(" C {:.2}", c.close),
+        format!(" {time}"),
+        format!(" O {}", fmt_price(c.open)),
+        format!(" H {}", fmt_price(c.high)),
+        format!(" L {}", fmt_price(c.low)),
+        format!(" C {}", fmt_price(c.close)),
+        format!(" {chg:+.2}%  range {}", fmt_price(c.high - c.low)),
         format!(" V {}", crate::markets::fmt_volume(c.volume)),
     ];
-    let max_w = lines.iter().map(|l| l.chars().count()).max().unwrap_or(8) as u16 + 2;
+    let w = lines.iter().map(|l| l.chars().count()).max().unwrap_or(8) as u16 + 3;
     let h = lines.len() as u16 + 2;
-    // Place tooltip to the right of cursor unless it would clip; then to left.
-    let mut tx = mx + 2;
-    if tx + max_w > chart_area.x + chart_area.width {
-        tx = mx.saturating_sub(max_w + 2);
+    if plot.width < w + 4 || plot.height < h {
+        return;
     }
-    let ty = my.saturating_sub(h / 2).max(chart_area.y);
     let r = Rect {
-        x: tx,
-        y: ty,
-        width: max_w,
+        x: if right {
+            plot.x + plot.width - w - 1
+        } else {
+            plot.x + 1
+        },
+        y: plot.y,
+        width: w,
         height: h,
     };
     render_clipped(frame, ratatui::widgets::Clear, r);
@@ -847,25 +1061,26 @@ fn render_hover_tooltip(
         .style(Style::default().fg(palette.text).bg(palette.bg));
     let inner = block.inner(r);
     render_clipped(frame, block, r);
+    let dir = if c.close >= c.open {
+        Color::LightGreen
+    } else {
+        Color::LightRed
+    };
     for (i, line) in lines.iter().enumerate() {
-        let y = inner.y + i as u16;
-        if y >= inner.y + inner.height {
-            break;
-        }
-        let style = if i == 0 {
-            Style::default()
-                .fg(dir)
+        let style = match i {
+            0 => Style::default()
+                .fg(palette.accent)
                 .bg(palette.bg)
-                .add_modifier(Modifier::BOLD)
-        } else {
-            Style::default().fg(palette.text).bg(palette.bg)
+                .add_modifier(Modifier::BOLD),
+            5 => Style::default().fg(dir).bg(palette.bg),
+            _ => Style::default().fg(palette.text).bg(palette.bg),
         };
         render_clipped(
             frame,
             Paragraph::new(line.clone()).style(style),
             Rect {
                 x: inner.x,
-                y,
+                y: inner.y + i as u16,
                 width: inner.width,
                 height: 1,
             },
@@ -887,6 +1102,7 @@ fn render_header(
     date_from: Option<&str>,
     date_to: Option<&str>,
     session: crate::markets::SessionWindow,
+    tick_age_secs: Option<f64>,
     palette: &Palette,
 ) -> (Rect, Rect, Rect) {
     // Empty data path.  Two distinct cases handled here:
@@ -1094,7 +1310,12 @@ fn render_header(
 
     let line2 = Line::from(vec![
         Span::styled(
-            format!("  ${:>8.2}  ", last.close),
+            // A formula's value is not a dollar price.
+            if crate::formula::is_formula(ticker) {
+                format!("  {}  ", crate::widgets::fmt::fmt_value(last.close))
+            } else {
+                format!("  ${:>8.2}  ", last.close)
+            },
             Style::default()
                 .fg(palette.text)
                 .bg(palette.bg)
@@ -1145,10 +1366,16 @@ fn render_header(
             secs % 60
         )
     };
-    let scroll_label = if chart_offset == 0 {
-        "LIVE".to_string()
-    } else {
-        format!("scrolled -{}/{}", chart_offset, history_total)
+    // "LIVE" only while ticks arrive: at the newest candle with a stalled
+    // feed the chart is a snapshot, and says so.
+    let (scroll_label, stale) = match (chart_offset, tick_age_secs) {
+        (0, Some(a)) if a <= LIVE_MAX_AGE_SECS => ("LIVE".to_string(), false),
+        (0, Some(a)) if a.is_finite() => (format!("STALE {:.0}s", a), true),
+        (0, _) => ("NO TICKS".to_string(), true),
+        _ => (
+            format!("scrolled -{}/{}", chart_offset, history_total),
+            false,
+        ),
     };
     // Render the static lines 1+2 first.
     let p =
@@ -1266,9 +1493,18 @@ fn render_header(
     };
     cur_x = paint(cur_x, &session_label, session_style);
 
-    // Tail: countdown + scroll label.
-    let tail = format!("  |  next close in {}  |  {}", countdown, scroll_label);
-    let _ = paint(cur_x, &tail, muted);
+    // Tail: countdown + live / stale / scroll label.
+    let tail = format!("  |  next close in {}  |  ", countdown);
+    cur_x = paint(cur_x, &tail, muted);
+    let label_style = if stale {
+        Style::default()
+            .fg(palette.warn)
+            .bg(palette.bg)
+            .add_modifier(Modifier::BOLD)
+    } else {
+        muted
+    };
+    let _ = paint(cur_x, &scroll_label, label_style);
 
     (from_rect, to_rect, session_rect)
 }

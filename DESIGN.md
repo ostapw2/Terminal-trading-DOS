@@ -452,9 +452,10 @@ must give a button a `Rect` at least 3 rows tall; shorter rects draw nothing.
 
 | Glyph | Where |
 |---|---|
-| `▔ ◆ Σ Δ` | chart: line cap, footprint POC / total / delta; `◆` also marks the status-line `DEMO DATA` badge |
+| `▔ ◆ Σ Δ` | chart: line cap, footprint POC / total / delta; `◆` also marks the status-line `DEMO DATA` badge and our resting order on a book row |
 | `▏▎▍▌▋▊▉` | order book: depth bars (eighth blocks) |
 | `● ○ ⚡` | status line: live / paper / WS indicators |
+| `● •` | chart: liquidation marks in characters (big / small; pixels draw rings) |
 | `← ↑ → ↓ ↔ ± × · • … – — ≈ §` | labels, hints, key names |
 | `⚠` | order book warnings |
 
@@ -467,6 +468,24 @@ predate Unicode and rendered identically on 1985 IBM PC text mode and
 monospace font that ships with macOS, Windows, or any modern Linux for
 the past 15 years.  No font on a remotely modern system fails to render
 these.
+
+## 9.7  Pixel layer (charts in real pixels)
+
+Where the terminal can show images (WezTerm, iTerm2; kitty with `DOS_GFX=kitty`)
+the plot of a chart, the volume bars, the order-book depth bars and imbalance
+gauge, and the equity curve are drawn as images, pixel-exact at any resolution
+(`src/gfx.rs`).  The rule that keeps the ASCII look:
+
+- **Text never becomes pixels.**  Menus, tables, axes, price labels, tooltips and
+  modals stay in the character grid, in the terminal's own font.
+- **Crisp, not smooth.**  No anti-aliasing, no gradients: hard-edged rectangles and
+  1-pixel-step lines in the palette colours (`Canvas`, at most 256 colours).
+- **Same geometry as the character chart.**  Candle slots are whole cells, prices
+  go through `chart::price_to_y`, so axis labels sit on the grid lines.
+- **Hairlines scale with the font** (`cell height / 16`), so a line is one "dot" of
+  the font at any size.
+- **The character version always exists.**  `:gfx off`, a terminal without
+  images and an open modal fall back to it with no other difference.
 
 ## 9.5  Mouse cursor (Rust runtime only)
 

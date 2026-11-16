@@ -112,6 +112,21 @@ pub enum CalendarButton {
     Apply,
 }
 
+const MONTH_NAMES_UK: [&str; 12] = [
+    "Січень",
+    "Лютий",
+    "Березень",
+    "Квітень",
+    "Травень",
+    "Червень",
+    "Липень",
+    "Серпень",
+    "Вересень",
+    "Жовтень",
+    "Листопад",
+    "Грудень",
+];
+
 const MONTH_NAMES: [&str; 12] = [
     "January",
     "February",
@@ -199,7 +214,8 @@ pub fn render(
     };
     let title_text = format!(
         " {} {} ",
-        MONTH_NAMES[(state.month.saturating_sub(1)) as usize % 12],
+        crate::i18n::pick(MONTH_NAMES, MONTH_NAMES_UK)
+            [(state.month.saturating_sub(1)) as usize % 12],
         state.year
     );
     render_clipped(
@@ -241,7 +257,7 @@ pub fn render(
         width: inner.width,
         height: 1,
     };
-    let weekday_line = " Mo Tu We Th Fr Sa Su";
+    let weekday_line = crate::i18n::pick(" Mo Tu We Th Fr Sa Su", " Пн Вт Ср Чт Пт Сб Нд");
     render_clipped(
         frame,
         Paragraph::new(weekday_line).style(Style::default().fg(palette.muted).bg(palette.bg)),
@@ -311,10 +327,16 @@ pub fn render(
     let top_y = inner.y + inner.height.saturating_sub(2 * button::HEIGHT);
     let bot_y = inner.y + inner.height.saturating_sub(button::HEIGHT);
 
-    let today_w = button::measure("Today");
-    let clear_w = button::measure("Clear");
-    let cancel_w = button::measure("Cancel");
-    let apply_w = button::measure("Apply");
+    let (today_l, clear_l, cancel_l, apply_l) = (
+        crate::i18n::pick("Today", "Сьогодні"),
+        crate::i18n::pick("Clear", "Скинути"),
+        crate::i18n::pick("Cancel", "Скасувати"),
+        crate::i18n::pick("Apply", "Застосувати"),
+    );
+    let today_w = button::measure(today_l);
+    let clear_w = button::measure(clear_l);
+    let cancel_w = button::measure(cancel_l);
+    let apply_w = button::measure(apply_l);
 
     let today_rect = Rect {
         x: inner.x,
@@ -354,10 +376,10 @@ pub fn render(
             button::render(frame, r, label, state, palette);
         };
 
-    render_btn(frame, today_rect, "Today", false, CalendarButton::Today);
-    render_btn(frame, clear_rect, "Clear", false, CalendarButton::Clear);
-    render_btn(frame, cancel_rect, "Cancel", false, CalendarButton::Cancel);
-    render_btn(frame, apply_rect, "Apply", true, CalendarButton::Apply);
+    render_btn(frame, today_rect, today_l, false, CalendarButton::Today);
+    render_btn(frame, clear_rect, clear_l, false, CalendarButton::Clear);
+    render_btn(frame, cancel_rect, cancel_l, false, CalendarButton::Cancel);
+    render_btn(frame, apply_rect, apply_l, true, CalendarButton::Apply);
 
     CalendarLayout {
         area,

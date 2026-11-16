@@ -4,6 +4,8 @@
 //! renders a clickable table.  Each row, when clicked, switches the app
 //! to the Markets view for that symbol.
 
+use crate::gfx::{self, Canvas};
+use crate::i18n::pick;
 use crate::widgets::fmt::{fmt_price_col, render_clipped, truncate, SPARKLINE_BARS};
 use std::collections::HashSet;
 
@@ -34,10 +36,10 @@ pub enum SortMode {
 impl SortMode {
     pub fn name(&self) -> &'static str {
         match self {
-            Self::Gap => "Range %",
-            Self::Change => "Change %",
-            Self::Volume => "Volume",
-            Self::Last => "Last",
+            Self::Gap => pick("Range %", "Діапазон %"),
+            Self::Change => pick("Change %", "Зміна %"),
+            Self::Volume => pick("Volume", "Обсяг"),
+            Self::Last => pick("Last", "Ціна"),
         }
     }
     pub fn display_name(&self, asc: bool) -> String {
@@ -123,7 +125,12 @@ pub fn render(
         .border_type(BorderType::Plain)
         .border_style(Style::default().fg(palette.text).bg(palette.bg))
         .title(Span::styled(
-            format!(" Screener  -  sort: {} ", sort.display_name(asc)),
+            format!(
+                " {}  -  {}: {} ",
+                pick("Screener", "Скринер"),
+                pick("sort", "сортування"),
+                sort.display_name(asc)
+            ),
             Style::default()
                 .fg(palette.accent)
                 .bg(palette.bg)
@@ -142,12 +149,20 @@ pub fn render(
 
     // Header row — last column label depends on sort mode.
     let last_col = match sort {
-        SortMode::Gap => "GAP%",
-        SortMode::Change => "CHG%",
-        SortMode::Volume => "VOL%",
-        SortMode::Last => "GAP%",
+        SortMode::Gap => pick("GAP%", "РОЗР.%"),
+        SortMode::Change => pick("CHG%", "ЗМІНА%"),
+        SortMode::Volume => pick("VOL%", "ОБСЯГ%"),
+        SortMode::Last => pick("GAP%", "РОЗР.%"),
     };
-    let header = format_row("#", "TICKER", "NAME", "LAST", last_col, "VOLUME", "TREND");
+    let header = format_row(
+        "#",
+        pick("TICKER", "ТІКЕР"),
+        pick("NAME", "НАЗВА"),
+        pick("LAST", "ЦІНА"),
+        last_col,
+        pick("VOLUME", "ОБСЯГ"),
+        pick("TREND", "ТРЕНД"),
+    );
     let h_area = Rect {
         x: pad.x,
         y: pad.y,
@@ -287,7 +302,10 @@ pub fn render(
 
     // Footer hint.
     let hint_y = pad.y + pad.height.saturating_sub(1);
-    let hint = " Up/Down select | Enter open | s sort | l live Binance | Esc back ";
+    let hint = pick(
+        " Up/Down select | Enter open | s sort | l live Binance | Esc back ",
+        " Вгору/вниз вибір | Enter відкрити | s сортування | l Binance наживо | Esc назад ",
+    );
     render_clipped(
         frame,
         Paragraph::new(hint).style(Style::default().fg(palette.muted).bg(palette.bg)),
@@ -397,12 +415,16 @@ pub fn render_live(
         .border_style(Style::default().fg(palette.text).bg(palette.bg))
         .title(Span::styled(
             format!(
-                " Screener LIVE ({}) {}  -  sort: {}  -  min vol: {} USDT  -  {} pairs ",
+                " {} LIVE ({}) {}  -  {}: {}  -  {}: {} USDT  -  {} {} ",
+                pick("Screener", "Скринер"),
                 venue.name(),
                 ws_status,
+                pick("sort", "сортування"),
                 sort.display_name(asc),
+                pick("min vol", "мін. обсяг"),
                 fmt_usdt(min_quote_volume),
                 pairs.len(),
+                pick("pairs", "пар"),
             ),
             Style::default()
                 .fg(palette.accent)
@@ -421,12 +443,20 @@ pub fn render_live(
     };
 
     let last_col = match sort {
-        SortMode::Gap => "RANGE%",
-        SortMode::Change => "CHG24H%",
-        SortMode::Volume => "VOL_USDT",
-        SortMode::Last => "RANGE%",
+        SortMode::Gap => pick("RANGE%", "ДІАП.%"),
+        SortMode::Change => pick("CHG24H%", "ЗМІНА24Г%"),
+        SortMode::Volume => pick("VOL_USDT", "ОБСЯГ_USDT"),
+        SortMode::Last => pick("RANGE%", "ДІАП.%"),
     };
-    let header = format_live_row("#", "PAIR", "VENUE", "LAST", last_col, "QV(USDT)", "TREND");
+    let header = format_live_row(
+        "#",
+        pick("PAIR", "ПАРА"),
+        pick("VENUE", "РИНОК"),
+        pick("LAST", "ЦІНА"),
+        last_col,
+        pick("QV(USDT)", "ОБСЯГ(USDT)"),
+        pick("TREND", "ТРЕНД"),
+    );
     // Header has a 4-char gutter to align with the checkbox column on
     // each row.
     let header = format!("    {header}");
@@ -603,7 +633,10 @@ pub fn render_live(
     }
 
     let hint_y = pad.y + pad.height.saturating_sub(1);
-    let hint = " Up/Down | Enter open chart | s sort | v venue | m min-vol | r refresh | Esc back ";
+    let hint = pick(
+        " Up/Down | Enter open chart | s sort | v venue | m min-vol | r refresh | Esc back ",
+        " Вгору/вниз | Enter графік | s сортування | v ринок | m мін. обсяг | r оновити | Esc назад ",
+    );
     render_clipped(
         frame,
         Paragraph::new(hint).style(Style::default().fg(palette.muted).bg(palette.bg)),
@@ -727,6 +760,30 @@ fn render_sparkline(frame: &mut Frame, area: Rect, data: &[Ohlc], color: Color, 
     let range = (max_p - min_p).max(1e-9);
 
     let buf = frame.buffer_mut();
+    // In pixels: a real line over the row's height, on the row's own colour.
+    let row = Rect { height: 1, ..area };
+    if let (Some((pw, ph)), Some((_, ch))) = (gfx::plot_px(row), gfx::cell_px()) {
+        let mut cv = Canvas::new(pw, ph, row_bg);
+        let ink = cv.ink(color);
+        let pad = (ch as f64 * 0.15).max(1.0);
+        let y_of =
+            |p: f64| (pad + (max_p - p) / range * (ph as f64 - 1.0 - 2.0 * pad)).round() as i64;
+        let step = pw as f64 / slice.len().max(1) as f64;
+        let x_of = |i: usize| (step * (i as f64 + 0.5)).round() as i64;
+        let thick = (ch as i64 / 14).max(1);
+        for i in 1..slice.len() {
+            cv.line(
+                x_of(i - 1),
+                y_of(slice[i - 1].close),
+                x_of(i),
+                y_of(slice[i].close),
+                thick,
+                ink,
+            );
+        }
+        gfx::submit(buf, row, cv);
+        return;
+    }
     for (i, o) in slice.iter().enumerate() {
         let x = area.x + i as u16;
         if x >= area.x + area.width {

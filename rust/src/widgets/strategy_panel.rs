@@ -5,6 +5,7 @@
 //! per-slot action buttons: `[Rn]` start, `[Sp]` stop, `[Ed]` cycle
 //! strategy, `[X ]` remove.
 
+use crate::i18n::pick;
 use crate::widgets::fmt::{fmt_price, fmt_qty, render_clipped, truncate};
 use ratatui::{
     layout::Rect,
@@ -45,6 +46,7 @@ pub fn render(
     area: Rect,
     runtime: &Runtime,
     active_slot: Option<usize>,
+    sides: &std::collections::HashMap<String, crate::watchlists::Side>,
     palette: &Palette,
 ) -> StrategyPanelLayout {
     let mut layout = StrategyPanelLayout {
@@ -73,7 +75,10 @@ pub fn render(
             format!("WS:{:.1}s ({})", ws_age_ms as f64 / 1000.0, ticks_label)
         }
     } else if runtime.ws_connected {
-        format!("WS:stalled ({})", ticks_label)
+        pick(
+            format!("WS:stalled ({})", ticks_label),
+            format!("WS:завис ({})", ticks_label),
+        )
     } else if !runtime.ws_status.is_empty() {
         format!("WS:{}", runtime.ws_status)
     } else {
@@ -85,8 +90,10 @@ pub fn render(
         .border_style(Style::default().fg(palette.text).bg(palette.bg))
         .title(Span::styled(
             format!(
-                " Selection ({}) - Equity ${:.2} - {} {} ",
+                " {} ({}) - {} ${:.2} - {} {} ",
+                pick("Selection", "Вибране"),
                 runtime.slots.len(),
+                pick("Equity", "Капітал"),
                 runtime.equity(),
                 ws_label,
                 kill_label(runtime),
@@ -102,8 +109,13 @@ pub fn render(
 
     // Header row — matches the per-row column widths above.
     let header = format!(
-        "{:<7} {:>10} {:>3} {:>6} {:<13}    ACT",
-        "PAIR", "PRICE", "STAT", "PNL", "POS@AVG"
+        "{:<7} {:>10} {:>3} {:>6} {:<13}    {}",
+        pick("PAIR", "ПАРА"),
+        pick("PRICE", "ЦІНА"),
+        pick("STAT", "СТ"),
+        "PNL",
+        pick("POS@AVG", "ПОЗ@СЕР"),
+        pick("ACT", "ДІЯ")
     );
     if inner.height >= 1 {
         render_clipped(
@@ -126,8 +138,11 @@ pub fn render(
     if runtime.slots.is_empty() && inner.height >= 3 {
         render_clipped(
             frame,
-            Paragraph::new("(no pairs selected — tick [X] in the screener on the left)")
-                .style(Style::default().fg(palette.muted).bg(palette.bg)),
+            Paragraph::new(pick(
+                "(nothing here yet: a adds a coin, or F4 Space / F5 t)",
+                "(поки порожньо: a додає монету, або F4 Space / F5 t)",
+            ))
+            .style(Style::default().fg(palette.muted).bg(palette.bg)),
             Rect {
                 x: inner.x + 2,
                 y: inner.y + 2,
@@ -157,6 +172,7 @@ pub fn render(
             slot,
             runtime,
             active_slot == Some(i),
+            sides.get(&slot.symbol).copied().unwrap_or_default(),
             palette,
         );
         layout.slots.push(row);
@@ -171,6 +187,7 @@ fn render_slot_row(
     slot: &crate::engine::Slot,
     runtime: &Runtime,
     active: bool,
+    side: crate::watchlists::Side,
     palette: &Palette,
 ) -> SlotRects {
     let bg = if active {
@@ -212,9 +229,9 @@ fn render_slot_row(
         palette.muted
     };
     let stat_label = match slot.status {
-        SlotStatus::Idle => "Idle",
-        SlotStatus::Running => "Run",
-        SlotStatus::Error => "Err",
+        SlotStatus::Idle => pick("Idle", "Пас"),
+        SlotStatus::Running => pick("Run", "Йде"),
+        SlotStatus::Error => pick("Err", "Пом"),
     };
     let stat_color = match slot.status {
         SlotStatus::Running => palette.ok,
@@ -259,7 +276,12 @@ fn render_slot_row(
         frame,
         &mut x,
         7,
-        truncate(&slot.symbol, 7).to_string(),
+        // Long/short-only slots carry an arrow in the last cell of the pair.
+        match side {
+            crate::watchlists::Side::Any => truncate(&slot.symbol, 7).to_string(),
+            crate::watchlists::Side::Long => format!("{:<6}↑", truncate(&slot.symbol, 6)),
+            crate::watchlists::Side::Short => format!("{:<6}↓", truncate(&slot.symbol, 6)),
+        },
         Style::default()
             .fg(palette.accent)
             .bg(bg)

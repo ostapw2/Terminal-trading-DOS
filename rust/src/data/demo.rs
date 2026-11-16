@@ -172,6 +172,8 @@ fn interval_ms(interval: &str) -> i64 {
         "1h" | "60m" => 3_600_000,
         "4h" => 4 * 3_600_000,
         "1d" => 86_400_000,
+        "1w" | "1wk" => 7 * 86_400_000,
+        "1M" | "1mo" => 30 * 86_400_000,
         _ => 60_000,
     }
 }
@@ -240,6 +242,50 @@ pub fn candles(ticker: &str, range: &str, interval: &str, now_ms: i64) -> Vec<Oh
 // ── trades ───────────────────────────────────────────────────────────────
 
 const TRADE_MS: i64 = 250;
+
+// ── futures market data (funding, open interest, ratios) ──────────────────
+
+/// Which futures reading (`kind`): "fr" funding % per 8 h, "oi" open
+/// interest in coins, "ls" long/short accounts, "tk" taker buy/sell.
+/// `limit` readings `step_ms` apart ending at `now_ms` (funding: 8 h).
+pub fn futures_readings(
+    kind: &str,
+    symbol: &str,
+    step_ms: i64,
+    limit: u32,
+    now_ms: i64,
+) -> Vec<Ohlc> {
+    let seed = hash_str(symbol) ^ hash_str(kind);
+    let last = now_ms.div_euclid(step_ms) * step_ms;
+    (0..limit as i64)
+        .rev()
+        .map(|back| {
+            let t = last - back * step_ms;
+            let x = t as f64 / 86_400_000.0;
+            let wave = (x * 0.9 + (seed % 7) as f64).sin();
+            let v = match kind {
+                // Mostly positive, sometimes negative, in tenths of a basis point.
+                "fr" => (0.008 + 0.012 * wave + 0.004 * (unit(seed, t) - 0.5)) * 1.0,
+                // In coins, a few billion dollars' worth for the big ones: a
+                // slow wave plus step-to-step noise, so it rises and falls.
+                "oi" => {
+                    3e9 / base_price(&core(symbol)).max(1e-9)
+                        * (1.0 + 0.1 * wave + 0.01 * (unit(seed, t) - 0.5))
+                }
+                "ls" => 1.0 + 0.6 * wave + 0.1 * (unit(seed, t) - 0.5),
+                _ => 1.0 + 0.3 * wave + 0.2 * (unit(seed, t) - 0.5),
+            };
+            Ohlc {
+                open: v,
+                high: v,
+                low: v,
+                close: v,
+                time_ms: t,
+                ..Default::default()
+            }
+        })
+        .collect()
+}
 
 /// Trade number `k` of `symbol` (index = time / 250 ms; stateless).
 fn trade_at(symbol: &str, k: i64) -> AggTrade {
@@ -490,6 +536,64 @@ fn level(p: f64, q: f64) -> String {
     format!("[\"{p:.8}\",\"{q:.8}\"]")
 }
 
+// ── liquidations ─────────────────────────────────────────────────────────
+
+/// Symbols that get liquidations in demo (the most traded ones).
+fn liq_symbols() -> Vec<String> {
+    universe().into_iter().take(12).collect()
+}
+
+/// The demo liquidation of `symbol` in second `k`, if any: rare in calm
+/// minutes, frequent when the price has just moved hard; longs on the way
+/// down, shorts on the way up.  A pure function, like the prices.
+pub fn liquidation_at(symbol: &str, k: i64) -> Option<crate::data::liquidations::Liquidation> {
+    let seed = hash_str(symbol) ^ 0x4C49_5155_4944;
+    let roll = unit(seed, k);
+    // The highest chance below; nothing else to compute above it.
+    if roll >= 0.3 {
+        return None;
+    }
+    let t = k * 1000;
+    let (now, before) = (price_at(symbol, t), price_at(symbol, t - 60_000));
+    let moved = (now / before).ln();
+    let chance = 0.004 + (moved.abs() * 60.0).min(0.29);
+    if roll >= chance {
+        return None;
+    }
+    // Mostly the side the move hurts.
+    let long = (moved < 0.0) != (unit(seed, k ^ 0x5151) < 0.12);
+    let big = if symbol.starts_with("BTC") || symbol.starts_with("ETH") {
+        4.0
+    } else {
+        1.0
+    };
+    let u = unit(seed, k ^ 0x7777);
+    let usd = 800.0 * big * (6.0 * u * u * u).exp();
+    // Filled at the market, like a real one.
+    let price = snap(now);
+    Some(crate::data::liquidations::Liquidation {
+        symbol: symbol.to_string(),
+        long,
+        price,
+        qty: snap(usd / price),
+        time_ms: t + (unit(seed, k ^ 0x1234) * 999.0) as i64,
+    })
+}
+
+/// Every demo liquidation in `[from_ms, to_ms)`, oldest first: the history a
+/// demo window starts with (the live feed sends the same ones as time passes).
+pub fn liquidations_between(
+    from_ms: i64,
+    to_ms: i64,
+) -> Vec<crate::data::liquidations::Liquidation> {
+    let syms = liq_symbols();
+    let mut out = Vec::new();
+    for k in from_ms.div_euclid(1000)..to_ms.div_euclid(1000) {
+        out.extend(syms.iter().filter_map(|s| liquidation_at(s, k)));
+    }
+    out
+}
+
 /// Stands in for `binance_ws::ws_loop` while demo mode is on.
 pub fn feed(url: &str, stop_rx: &Receiver<()>, on: &mut dyn FnMut(Signal) -> Flow) {
     if on(Signal::Connected) == Flow::Stop {
@@ -551,6 +655,74 @@ pub fn feed(url: &str, stop_rx: &Receiver<()>, on: &mut dyn FnMut(Signal) -> Flo
                 last = id;
             }
         }
+    } else if url.contains("streams=") && url.contains("@bookTicker") {
+        // Combined per-symbol streams: /stream?streams=btcusdt@bookTicker/ethusdt@bookTicker
+        let syms: Vec<String> = url
+            .rsplit("streams=")
+            .next()
+            .unwrap_or("")
+            .split('/')
+            .filter_map(|p| p.split('@').next())
+            .filter(|s| !s.is_empty())
+            .map(str::to_ascii_uppercase)
+            .collect();
+        while sleep_or_stop(stop_rx, 250) {
+            let now = now_ms();
+            for s in &syms {
+                let tick = tick_size(s);
+                let bid = snap((price_at(s, now) / tick).floor() * tick);
+                let text = format!(
+                    "{{\"stream\":\"{}@bookTicker\",\"data\":{{\"u\":{now},\"s\":\"{s}\",\"b\":\"{bid:.8}\",\"B\":\"1\",\"a\":\"{:.8}\",\"A\":\"1\"}}}}",
+                    s.to_ascii_lowercase(),
+                    snap(bid + tick)
+                );
+                if on(Signal::Text(text)) == Flow::Stop {
+                    return;
+                }
+            }
+        }
+    } else if url.contains("!miniTicker@arr") {
+        // All symbols once a second, like the real stream.
+        let syms = universe();
+        while sleep_or_stop(stop_rx, 1000) {
+            let now = now_ms();
+            let rows: Vec<String> = syms
+                .iter()
+                .map(|s| {
+                    // 24h quote volume as the screener's summary has it.
+                    let quote = 1e7 * (6.0 * unit(hash_str(&core(s)), 21)).exp();
+                    format!(
+                        "{{\"e\":\"24hrMiniTicker\",\"E\":{now},\"s\":\"{s}\",\"c\":\"{:.8}\",\"q\":\"{quote:.2}\"}}",
+                        snap(price_at(s, now))
+                    )
+                })
+                .collect();
+            if on(Signal::Text(format!("[{}]", rows.join(",")))) == Flow::Stop {
+                return;
+            }
+        }
+    } else if url.contains("!forceOrder") {
+        let syms = liq_symbols();
+        let mut last = now_ms().div_euclid(1000);
+        while sleep_or_stop(stop_rx, 250) {
+            let k_now = now_ms().div_euclid(1000);
+            for k in last..k_now {
+                for l in syms.iter().filter_map(|s| liquidation_at(s, k)) {
+                    let text = format!(
+                        "{{\"e\":\"forceOrder\",\"E\":{t},\"o\":{{\"s\":\"{}\",\"S\":\"{}\",\"o\":\"LIMIT\",\"f\":\"IOC\",\"q\":\"{q:.8}\",\"p\":\"{p:.8}\",\"ap\":\"{p:.8}\",\"X\":\"FILLED\",\"l\":\"{q:.8}\",\"z\":\"{q:.8}\",\"T\":{t}}}}}",
+                        l.symbol,
+                        if l.long { "SELL" } else { "BUY" },
+                        t = l.time_ms,
+                        q = l.qty,
+                        p = l.price,
+                    );
+                    if on(Signal::Text(text)) == Flow::Stop {
+                        return;
+                    }
+                }
+            }
+            last = k_now;
+        }
     } else if url.contains("!bookTicker") {
         let syms = universe();
         while sleep_or_stop(stop_rx, 250) {
@@ -580,6 +752,31 @@ mod tests {
     use crate::data::orderbook::{parse_depth_diff, LocalBook};
 
     const NOW: i64 = 1_790_000_000_000;
+
+    #[test]
+    fn liquidations_follow_the_move_and_parse() {
+        let all = liquidations_between(NOW - 3_600_000, NOW);
+        assert!(
+            all.len() > 20,
+            "an hour of demo has liquidations: {}",
+            all.len()
+        );
+        assert!(all
+            .windows(2)
+            .all(|w| w[0].time_ms / 1000 <= w[1].time_ms / 1000));
+        assert!(all.iter().any(|l| l.long) && all.iter().any(|l| !l.long));
+        // The feed's JSON parses back to the same event.
+        let l = &all[0];
+        let text = format!(
+            "{{\"e\":\"forceOrder\",\"o\":{{\"s\":\"{}\",\"S\":\"{}\",\"q\":\"{q:.8}\",\"p\":\"{p:.8}\",\"ap\":\"{p:.8}\",\"z\":\"{q:.8}\",\"T\":{}}}}}",
+            l.symbol,
+            if l.long { "SELL" } else { "BUY" },
+            l.time_ms,
+            q = l.qty,
+            p = l.price
+        );
+        assert_eq!(&crate::data::liquidations::parse_force_orders(&text)[0], l);
+    }
 
     #[test]
     fn same_inputs_same_series() {

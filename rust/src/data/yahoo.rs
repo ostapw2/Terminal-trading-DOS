@@ -155,7 +155,7 @@ struct QuoteSeries {
 
 // ─── helpers ─────────────────────────────────────────────────────────
 
-fn urlencode(s: &str) -> String {
+pub(crate) fn urlencode(s: &str) -> String {
     // RFC 3986 unreserved; everything else gets %XX-encoded.
     let mut out = String::with_capacity(s.len());
     for b in s.bytes() {

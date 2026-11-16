@@ -9,9 +9,7 @@
 //! |  BASKET: 17 pairs    Open 0/17            |
 //! |  UPNL +$0.00 (+0.00%)                     |
 //! +-------------------------------------------+
-//! |  [ BUY MKT ]   [ SELL MKT ]               |
-//! |  [ BUY ASK ]   [ SELL ASK ]               |
-//! |  [ BUY BID ]   [ SELL BID ]               |
+//! |  [   BUY   ]   [   SELL   ]               |
 //! |  [   REV   ]   [   CLOSE  ]               |
 //! +-------------------------------------------+
 //! |  [QTY]  [-] 0.100 [+]   (≈ $5.00 / pair)  |
@@ -36,6 +34,7 @@
 //! Mouse routing happens in `commander.rs`: every clickable rect lives
 //! on the returned [`TradeTicketLayout`].
 
+use crate::i18n::pick;
 use crate::widgets::fmt::{
     fmt_money_signed, fmt_qty_plain, pnl_color, rect_contains, render_clipped,
 };
@@ -53,12 +52,11 @@ use crate::widgets::button;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum TicketAction {
+    /// At market (the paper broker fills at the last price; a limit at the
+    /// last price would fill the same way, so the ticket offers no bid /
+    /// ask variants - resting limits come from the chart and the book).
     BuyMarket,
     SellMarket,
-    BuyAsk,
-    SellAsk,
-    BuyBid,
-    SellBid,
     Reverse,
     Close,
 }
@@ -66,14 +64,10 @@ pub enum TicketAction {
 impl TicketAction {
     pub fn label(self) -> &'static str {
         match self {
-            Self::BuyMarket => "BUY MKT",
-            Self::SellMarket => "SELL MKT",
-            Self::BuyAsk => "BUY ASK",
-            Self::SellAsk => "SELL ASK",
-            Self::BuyBid => "BUY BID",
-            Self::SellBid => "SELL BID",
-            Self::Reverse => "REV",
-            Self::Close => "CLOSE",
+            Self::BuyMarket => pick("BUY", "КУПИТИ"),
+            Self::SellMarket => pick("SELL", "ПРОДАТИ"),
+            Self::Reverse => pick("REV", "РЕВЕРС"),
+            Self::Close => pick("CLOSE", "ЗАКРИТИ"),
         }
     }
 }
@@ -89,7 +83,7 @@ pub enum SizeMode {
 impl SizeMode {
     pub fn label(self) -> &'static str {
         match self {
-            Self::Qty => "QTY",
+            Self::Qty => pick("QTY", "К-СТЬ"),
             Self::Usd => "USD",
         }
     }
@@ -128,10 +122,18 @@ pub struct TradeTicketLayout {
     pub leverage_cycle: Rect,
 }
 
+/// What the ticket buttons act on: a label for the title and how many
+/// symbols that is.
+pub struct TicketTarget<'a> {
+    pub label: &'a str,
+    pub count: usize,
+}
+
 pub fn render(
     frame: &mut Frame,
     area: Rect,
     runtime: &Runtime,
+    target: &TicketTarget,
     ticket_qty: f64,
     ticket_notional: f64,
     size_mode: SizeMode,
@@ -147,9 +149,18 @@ pub fn render(
 
     let live = runtime.is_live();
     let title = if live {
-        " Trade Ticket - BASKET [LIVE BINANCE] "
+        format!(
+            " {} - {} [LIVE BINANCE] ",
+            pick("Ticket", "Тікет"),
+            target.label
+        )
     } else {
-        " Trade Ticket - BASKET [PAPER] "
+        format!(
+            " {} - {} [{}] ",
+            pick("Ticket", "Тікет"),
+            target.label,
+            pick("PAPER", "ПАПІР")
+        )
     };
     let title_color = if live {
         Color::LightRed
@@ -173,7 +184,7 @@ pub fn render(
     render_clipped(frame, block, area);
 
     // ── Header (2 lines: basket size + UPNL) ──────────────────────────
-    render_header(frame, inner, runtime, palette);
+    render_header(frame, inner, runtime, target.count, palette);
 
     // ── Button grid (4 rows × 2 cols of 3-row buttons = 12 rows) ──────
     let grid_top = inner.y + 2;
@@ -185,7 +196,15 @@ pub fn render(
             width: inner.width,
             height: grid_height,
         };
-        layout.buttons = render_button_grid(frame, grid_area, runtime, mouse, pressed, palette);
+        layout.buttons = render_button_grid(
+            frame,
+            grid_area,
+            runtime,
+            target.count > 0,
+            mouse,
+            pressed,
+            palette,
+        );
     }
 
     // ── Footer: 2 lines ───────────────────────────────────────────────
@@ -199,7 +218,7 @@ pub fn render(
             width: inner.width.saturating_sub(2),
             height: 1,
         };
-        let n_pairs = runtime.slots.len();
+        let n_pairs = target.count;
         let (mode_r, qm, qf, qp) = render_footer_size_line(
             frame,
             line1,
@@ -230,7 +249,13 @@ pub fn render(
     layout
 }
 
-fn render_header(frame: &mut Frame, inner: Rect, runtime: &Runtime, palette: &Palette) {
+fn render_header(
+    frame: &mut Frame,
+    inner: Rect,
+    runtime: &Runtime,
+    n_pairs: usize,
+    palette: &Palette,
+) {
     let pad = Rect {
         x: inner.x + 1,
         y: inner.y,
@@ -238,7 +263,6 @@ fn render_header(frame: &mut Frame, inner: Rect, runtime: &Runtime, palette: &Pa
         height: 2.min(inner.height),
     };
 
-    let n_pairs = runtime.slots.len();
     let n_open = runtime
         .broker
         .all_positions()
@@ -274,18 +298,29 @@ fn render_header(frame: &mut Frame, inner: Rect, runtime: &Runtime, palette: &Pa
 
     let line1 = vec![
         Span::styled(
-            "BASKET: ",
+            pick("TARGET: ", "ЦІЛЬ: "),
             Style::default().fg(palette.muted).bg(palette.bg),
         ),
         Span::styled(
-            format!("{} pairs", n_pairs),
+            format!(
+                "{} {}",
+                n_pairs,
+                if n_pairs == 1 {
+                    pick("symbol", "символ")
+                } else {
+                    pick("symbols", "символів")
+                }
+            ),
             Style::default()
                 .fg(palette.accent)
                 .bg(palette.bg)
                 .add_modifier(Modifier::BOLD),
         ),
         Span::styled(
-            format!("    Open {}/{} positions", n_open, n_pairs),
+            pick(
+                format!("    Open {}/{} positions", n_open, n_pairs),
+                format!("    Відкрито {}/{} позицій", n_open, n_pairs),
+            ),
             Style::default().fg(palette.text).bg(palette.bg),
         ),
     ];
@@ -315,6 +350,7 @@ fn render_button_grid(
     frame: &mut Frame,
     area: Rect,
     runtime: &Runtime,
+    basket_present: bool,
     mouse: Option<(u16, u16)>,
     pressed: Option<TicketAction>,
     palette: &Palette,
@@ -324,12 +360,10 @@ fn render_button_grid(
         .constraints([
             Constraint::Length(3),
             Constraint::Length(3),
-            Constraint::Length(3),
-            Constraint::Length(3),
+            Constraint::Min(0),
         ])
         .split(area);
 
-    let basket_present = !runtime.slots.is_empty();
     let any_open_position = runtime
         .broker
         .all_positions()
@@ -338,12 +372,10 @@ fn render_button_grid(
 
     let row_specs = [
         (TicketAction::BuyMarket, TicketAction::SellMarket),
-        (TicketAction::BuyAsk, TicketAction::SellAsk),
-        (TicketAction::BuyBid, TicketAction::SellBid),
         (TicketAction::Reverse, TicketAction::Close),
     ];
 
-    let mut out = Vec::with_capacity(8);
+    let mut out = Vec::with_capacity(4);
     for (i, (left, right)) in row_specs.iter().enumerate() {
         let cols = Layout::default()
             .direction(Direction::Horizontal)
@@ -376,15 +408,7 @@ fn render_action_button(
         .map(|(x, y)| rect_contains(area, x, y))
         .unwrap_or(false);
     let is_pressed = pressed == Some(action);
-    let primary = matches!(
-        action,
-        TicketAction::BuyMarket
-            | TicketAction::BuyAsk
-            | TicketAction::BuyBid
-            | TicketAction::SellMarket
-            | TicketAction::SellAsk
-            | TicketAction::SellBid
-    );
+    let primary = matches!(action, TicketAction::BuyMarket | TicketAction::SellMarket);
     let state = button::pick_state(disabled, is_pressed, false, hover, primary);
     button::render(frame, area, action.label(), state, palette);
 
@@ -393,12 +417,8 @@ fn render_action_button(
     // `button::render` to colour-tint the face.
     if !disabled && !is_pressed {
         let tint = match action {
-            TicketAction::BuyMarket | TicketAction::BuyAsk | TicketAction::BuyBid => {
-                Some(Color::LightGreen)
-            }
-            TicketAction::SellMarket | TicketAction::SellAsk | TicketAction::SellBid => {
-                Some(Color::LightRed)
-            }
+            TicketAction::BuyMarket => Some(Color::LightGreen),
+            TicketAction::SellMarket => Some(Color::LightRed),
             TicketAction::Reverse => Some(palette.accent),
             TicketAction::Close => Some(palette.warn),
         };
@@ -412,16 +432,12 @@ fn render_action_button(
                     height: 1,
                 };
                 let buf = frame.buffer_mut();
-                let label = action.label();
+                let label: Vec<char> = action.label().chars().collect();
                 let pad = (face.width as usize).saturating_sub(label.len()) / 2;
                 for col in 0..face.width {
                     if let Some(cell) = buf.cell_mut((face.x + col, face.y)) {
                         let ch = if (col as usize) >= pad && (col as usize) < pad + label.len() {
-                            label
-                                .as_bytes()
-                                .get((col as usize) - pad)
-                                .map(|b| *b as char)
-                                .unwrap_or(' ')
+                            label.get((col as usize) - pad).copied().unwrap_or(' ')
                         } else {
                             ' '
                         };
@@ -582,8 +598,16 @@ fn render_footer_size_line(
 
     // Per-pair preview — the value is applied to EVERY pair on submit.
     let preview = match size_mode {
-        SizeMode::Qty => format!("  qty × {} pairs", n_pairs),
-        SizeMode::Usd => format!("  ${:.2} × {} pairs", ticket_notional, n_pairs),
+        SizeMode::Qty => pick(
+            format!("  qty × {} pairs", n_pairs),
+            format!("  к-сть × {} пар", n_pairs),
+        ),
+        SizeMode::Usd => format!(
+            "  ${:.2} × {} = ${:.2}",
+            ticket_notional,
+            n_pairs,
+            ticket_notional * n_pairs as f64
+        ),
     };
     let pw = (preview.len() as u16).min((area.x + area.width).saturating_sub(x));
     if pw > 0 {
